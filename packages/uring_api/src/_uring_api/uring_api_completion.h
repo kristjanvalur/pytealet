@@ -94,10 +94,14 @@ typedef struct {
     bool constructed;
 } UringApiCompletionScalarState;
 
-/* CLOSE scalar flags. Not a kernel close flag. Set SO_LINGER {1, 0}
- * before the close SQE so a TCP close resets. A setsockopt failure
- * is ignored. */
+/* CLOSE scalar flags. Not a kernel close flag. SO_LINGER {1, 0} is
+ * set when this close is accepted onto the conflict FIFO or an SQE.
+ * A setsockopt failure is ignored. The option is not cleared. */
 #define URING_API_CLOSE_ABORTIVE 1u
+
+/* SQE fd becomes -1. the stored fd stays. close and cancel are not
+ * poisoned. asserts on a kind that has no fd to submit. */
+void completion_poison_fd(UringApiCompletion *completion);
 
 int completion_type_check(PyObject *completion);
 UringApiCompletionViewState *UringApiCompletion_get_view_state(UringApiCompletion *self);

@@ -617,6 +617,63 @@ PyObject *UringApiRing_submit(UringApiRing *self, PyObject *Py_UNUSED(ignored)) 
     return PyLong_FromLong(submitted);
 }
 
+/* Mark the pipeline this completion still belongs to, then cancel its
+ * send_all. The completion is either on that FIFO or is the active
+ * send_all. A miss does nothing. The caller posts the close. */
+int UringApiRing_abort_queue_impl(UringApiRing *self, PyObject *completion_obj, int *cancelled) {
+    UringApiCompletion *completion;
+    UringApiCompletion *active = NULL;
+    int found = 0;
+    int failed = 0;
+
+    if (!cancelled) {
+        PyErr_SetString(PyExc_ValueError, "cancelled output pointer is required");
+        return -1;
+    }
+    *cancelled = 0;
+    if (!PyObject_TypeCheck(completion_obj, &UringApiCompletion_Type)) {
+        PyErr_SetString(PyExc_TypeError, "completion must be a Completion");
+        return -1;
+    }
+    completion = (UringApiCompletion *)completion_obj;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    if (ring_check_open(self) < 0) {
+        failed = 1;
+    } else {
+        found = fd_table_abort_pipeline(self, completion, &active);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (failed) {
+        return -1;
+    }
+    if (!found || active == NULL) {
+        return 0;
+    }
+    {
+        PyObject *posted = UringApiRing_prepare_cancel_nowait_impl(self, (PyObject *)active);
+
+        Py_DECREF(active);
+        if (posted == NULL) {
+            return -1;
+        }
+        Py_DECREF(posted);
+    }
+    *cancelled = 1;
+    return 0;
+}
+
+static PyObject *UringApiRing_abort_queue(UringApiRing *self, PyObject *completion_obj) {
+    int cancelled = 0;
+
+    if (UringApiRing_abort_queue_impl(self, completion_obj, &cancelled) < 0) {
+        return NULL;
+    }
+    if (cancelled) {
+        Py_RETURN_TRUE;
+    }
+    Py_RETURN_FALSE;
+}
+
 static PyMethodDef UringApiRing_methods[] = {
     {"close", (PyCFunction)UringApiRing_close, METH_NOARGS, "Close the io_uring instance."},
     {"pending_count", (PyCFunction)UringApiRing_pending_count, METH_NOARGS,
@@ -875,6 +932,15 @@ static PyMethodDef UringApiRing_methods[] = {
      "target before the cancel SQE is submitted. Only a recv_multishot target drops "
      "later CQEs. "
      "Lost-race acks (-ENOENT/-EALREADY) are silent; other res < 0 invoke nowait_error_handler."},
+    {"abort_queue", (PyCFunction)UringApiRing_abort_queue, METH_O,
+     "Mark the pipeline of a completion that is still on its per-fd queue, or\n"
+     "of the send_all active on that queue, then cancel that send_all.\n\n"
+     "The mark is set before the cancel, and SO_LINGER {1, 0} is set on the\n"
+     "fd then. The option stays. A send_all that finishes successfully still\n"
+     "leaves the fd abortive. The ring does not submit a close; the caller\n"
+     "does. Returns True when a cancel was issued, False when the completion\n"
+     "is not on a live pipeline or no send_all is in progress. A failure to\n"
+     "post the cancel raises, with the mark and the option already set."},
     {"construct_shutdown", _PyCFunction_CAST(UringApiRing_construct_shutdown), METH_FASTCALL,
      "Construct a shutdown Completion without reserving an SQE. Positional only: fd, how, user_data=None."},
     {"prepare_shutdown", _PyCFunction_CAST(UringApiRing_prepare_shutdown), METH_FASTCALL,
@@ -885,20 +951,22 @@ static PyMethodDef UringApiRing_methods[] = {
      "Construct, prepare, and drop a nowait shutdown. Returns None. Positional only."},
     {"construct_close", _PyCFunction_CAST(UringApiRing_construct_close), URING_API_METH_KEYWORDS,
      "Construct a close Completion without reserving an SQE.\n\n"
-     "Positional: fd, user_data=None. Keyword-only abortive=False sets\n"
-     "SO_LINGER with a zero timeout when the close SQE is filled."},
+     "Positional: fd, user_data=None. Keyword-only abortive=False records an\n"
+     "abortive close. The socket is unchanged until that close is accepted\n"
+     "onto the conflict FIFO or an SQE."},
     {"prepare_close", _PyCFunction_CAST(UringApiRing_prepare_close), URING_API_METH_KEYWORDS,
      "Construct and prepare a close (convenience for construct_close + prepare).\n\n"
-     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} before\n"
-     "the close SQE. A setsockopt failure is ignored."},
+     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} when\n"
+     "the close is accepted onto the conflict FIFO or an SQE. A setsockopt\n"
+     "failure is ignored. The option is not cleared."},
     {"construct_close_nowait", _PyCFunction_CAST(UringApiRing_construct_close_nowait), URING_API_METH_KEYWORDS,
      "Construct a nowait close Completion (temporary hold; prepare stamps a tagged SQE).\n\n"
      "Keyword-only abortive=False. See prepare_close."},
     {"prepare_close_nowait", _PyCFunction_CAST(UringApiRing_prepare_close_nowait), URING_API_METH_KEYWORDS,
      "Construct, prepare, and drop a nowait close. Returns None.\n\n"
-     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} before\n"
-     "the close. When IORING_FEAT_CQE_SKIP is available, sets IOSQE_CQE_SKIP_SUCCESS so successful "
-     "closes post no CQE."},
+     "Keyword-only abortive=False. abortive=True sets SO_LINGER {1, 0} when\n"
+     "the close is accepted onto the conflict FIFO or an SQE. When IORING_FEAT_CQE_SKIP is available, "
+     "sets IOSQE_CQE_SKIP_SUCCESS so successful closes post no CQE."},
     {"construct_read", _PyCFunction_CAST(UringApiRing_construct_read), URING_API_METH_KEYWORDS,
      "Construct a file read Completion without reserving an SQE."},
     {"prepare_read", _PyCFunction_CAST(UringApiRing_prepare_read), URING_API_METH_KEYWORDS,

@@ -357,6 +357,17 @@ int UringApiCapi_RingMakeRoom(PyObject *ring, int *value) {
     return 0;
 }
 
+int UringApiCapi_RingAbortQueue(PyObject *ring, PyObject *completion, int *cancelled) {
+    if (!ring_type_check(ring)) {
+        return -1;
+    }
+    if (!cancelled) {
+        PyErr_SetString(PyExc_ValueError, "cancelled output pointer is required");
+        return -1;
+    }
+    return UringApiRing_abort_queue_impl((UringApiRing *)ring, completion, cancelled);
+}
+
 int UringApiCapi_CompletionCheck(PyObject *completion) { return completion_type_check(completion); }
 
 PyObject *UringApiCapi_CompletionUserData(PyObject *completion) {

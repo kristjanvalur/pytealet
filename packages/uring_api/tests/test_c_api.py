@@ -894,6 +894,31 @@ def test_c_api_construct_send_all_and_prepare():
         writer.close()
 
 
+def test_c_api_abort_queue_cancels_the_active_send_all():
+    require_uring()
+
+    client = build_c_api_client()
+    reader, writer = connected_tcp_pair()
+    reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+    fd = writer.detach()
+    try:
+        with uring_api.Ring(flags=0) as ring:
+            pending = client.construct_send_all(ring, fd, b"x" * (256 * 1024), 0, object())
+            queued = client.construct_send(ring, fd, b"more", 0, object())
+            assert client.prepare(ring, [pending, queued]) == 2
+            assert queued.prepared is False
+            assert client.abort_queue(ring, queued) is True
+            stranger = client.construct_send(ring, fd, b"z", 0, object())
+            assert client.abort_queue(ring, stranger) is False
+    finally:
+        reader.close()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def test_c_api_prepare_close_on_busy_send_all_parks():
     require_uring()
 

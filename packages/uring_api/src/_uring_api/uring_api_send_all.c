@@ -52,8 +52,9 @@ int send_all_fill_sqe(UringApiRing *self, UringApiCompletion *completion, struct
     if (later_leg && uring_api_recvsend_poll_first_capable()) {
         flags |= IORING_RECVSEND_POLL_FIRST;
     }
-    io_uring_prep_send(sqe, view_state->fd, (char *)view_state->view.buf + (Py_ssize_t)view_state->offset,
-                       (size_t)remaining, (int)recvsend_msg_flags(flags));
+    io_uring_prep_send(sqe, completion_sqe_fd(completion, view_state->fd),
+                       (char *)view_state->view.buf + (Py_ssize_t)view_state->offset, (size_t)remaining,
+                       (int)recvsend_msg_flags(flags));
     recvsend_apply_ioprio(sqe, flags);
     return 0;
 }
@@ -79,12 +80,15 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     slot = fd_table_lookup(self, view_state->fd);
     if (slot != NULL && slot->active == completion) {
         slot->active = NULL;
+        /* only a nowait drain. a waitable or skip_success failure
+         * leaves a queued close graceful. the option stays, and an
+         * empty queue keeps the slot so a later close can find it. */
+        if (completion->res < 0 && completion_has_bit(completion, URING_API_C_SKIP_ALL)) {
+            slot->abortive = 1;
+            fd_arm_abortive(slot->fd);
+        }
         if (slot->fifo.count > 0) {
-            /* a failed drain must not FIN. the queued close resets.
-             * this is the only FIFO copy. a full SQ enters. */
-            if (completion->res < 0) {
-                fd_slot_mark_queued_closes_abortive(slot);
-            }
+            /* this is the only FIFO copy. a full SQ enters. */
             if (drain_fd_slot(self, slot) < 0) {
                 failed = 1;
             }
@@ -237,12 +241,15 @@ int send_all_on_cqe(UringApiRing *self, UringApiCompletion *completion, int res,
             completion_set_bit(completion, URING_API_C_AUX_DECREF);
             uring_api_refcount_mutex_unlock(&self->refcount_mutex);
         }
-    } else if (res == 0) {
-        complete_res = -EAGAIN;
     } else {
-        /* try_next_leg holds the ring section across the abandon check
-         * and the arm. 1 means cancel won: finish, do not publish a leg. */
-        int next = send_all_try_next_leg(self, completion);
+        /* a positive-length leg does not return 0. res < 0 and a
+         * finished buffer already returned above. try_next_leg holds
+         * the ring section across the abandon check and the arm.
+         * 1 means cancel won: finish, do not publish a leg. */
+        int next;
+
+        assert(res > 0);
+        next = send_all_try_next_leg(self, completion);
 
         if (next == -2) {
             return send_all_abort_unparked(self, completion);

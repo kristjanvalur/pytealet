@@ -15,8 +15,11 @@ UringApiCompletion *completion_fifo_peek(UringApiCompletionFifo *fifo);
 UringApiCompletion *completion_fifo_pop(UringApiCompletionFifo *fifo);
 int completion_fifo_traverse(UringApiCompletionFifo *fifo, visitproc visit, void *arg);
 void completion_fifo_clear(UringApiRing *ring, UringApiCompletionFifo *fifo);
-/* A failed send-all drain resets instead of FIN. Caller holds the ring CS. */
-void fd_slot_mark_queued_closes_abortive(UringApiFdSlot *slot);
+/* The completion is on a per-fd FIFO or is the active send_all.
+ * Marks that slot and sets SO_LINGER. *active_out is a new reference
+ * to the in-progress send_all, or NULL when there is nothing to cancel.
+ * 1 found, 0 miss. Caller holds the ring CS. */
+int fd_table_abort_pipeline(UringApiRing *self, UringApiCompletion *completion, UringApiCompletion **active_out);
 int fd_table_fifo_push(UringApiFdSlot *slot, UringApiCompletion *completion);
 UringApiCompletion *fd_table_fifo_peek(UringApiFdSlot *slot);
 UringApiCompletion *fd_table_fifo_pop(UringApiFdSlot *slot);

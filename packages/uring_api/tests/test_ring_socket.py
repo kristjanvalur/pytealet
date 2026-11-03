@@ -616,7 +616,7 @@ def _assert_fd_closed(fd: int) -> None:
 
 
 def test_ring_close_abortive_resets_tcp_when_available():
-    """abortive=True sets SO_LINGER {1, 0} at fill, then the close resets."""
+    """abortive=True sets SO_LINGER {1, 0} when the close SQE is taken."""
     require_uring()
 
     reader, writer = connected_tcp_pair()

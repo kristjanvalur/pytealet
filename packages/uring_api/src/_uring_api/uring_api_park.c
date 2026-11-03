@@ -164,8 +164,79 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         return -1;
     }
     /* the push is the commit: a failure above did not adopt the completion.
-     * the send_all completion copies this FIFO. nothing else walks it. */
+     * a graceful close has no abortive bit. the send_all completion copies
+     * this FIFO. nothing else walks it. */
+    completion_arm_abortive_close(completion);
     return 0;
+}
+
+void stage_a_copy_abortive(UringApiRing *self, UringApiCompletion *completion, int *poisoned_here,
+                           int *discharge_close) {
+    int fd;
+    UringApiFdSlot *slot;
+
+    if (poisoned_here) {
+        *poisoned_here = 0;
+    }
+    if (discharge_close) {
+        *discharge_close = 0;
+    }
+    if (completion_conflict_fd(completion, &fd) < 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, fd);
+    if (slot == NULL || !slot->abortive) {
+        return;
+    }
+    if (completion->kind == URING_API_PENDING_CLOSE) {
+        UringApiCompletionScalarState *scalar = UringApiCompletion_get_scalar_state(completion);
+
+        assert(scalar != NULL);
+        /* fd < 0 does not release the descriptor. the mark stays until
+         * a real close is the one that leaves. */
+        if (scalar->fd >= 0) {
+            scalar->flags |= URING_API_CLOSE_ABORTIVE;
+            if (discharge_close) {
+                *discharge_close = 1;
+            }
+        }
+        return;
+    }
+    if (completion->kind == URING_API_PENDING_CANCEL) {
+        return;
+    }
+    if (!completion_kind_conflicts(completion->kind)) {
+        return;
+    }
+    completion_poison_fd(completion);
+    if (poisoned_here) {
+        *poisoned_here = 1;
+    }
+}
+
+void stage_a_discharge_close(UringApiRing *self, UringApiCompletion *completion) {
+    UringApiCompletionScalarState *scalar;
+    UringApiFdSlot *slot;
+
+    if (completion->kind != URING_API_PENDING_CLOSE) {
+        return;
+    }
+    scalar = UringApiCompletion_get_scalar_state(completion);
+    assert(scalar != NULL);
+    if (scalar->fd < 0 || (scalar->flags & URING_API_CLOSE_ABORTIVE) == 0) {
+        return;
+    }
+    slot = fd_table_lookup(self, scalar->fd);
+    /* an explicit abortive close on a slot that was not marked is a no-op.
+     * siblings still on the FIFO keep the slot; only an idle one is freed.
+     * the socket option stays. this clears the slot mark only. */
+    if (slot == NULL || !slot->abortive || slot->active != NULL) {
+        return;
+    }
+    slot->abortive = 0;
+    if (slot->fifo.count == 0) {
+        fd_table_try_free(self, slot);
+    }
 }
 
 void clear_parked(UringApiRing *self) { fd_table_clear(self); }

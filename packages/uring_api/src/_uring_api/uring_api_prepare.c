@@ -159,16 +159,32 @@ static void prep_poll_remove_sqe(struct io_uring_sqe *sqe, void *arg) {
 }
 
 /* best-effort. a non-socket rejects SO_LINGER. the close still runs.
- * call only after the close SQE will stay queued. the caller already
- * holds the ring critical section and that slot. do not drop the GIL
- * here: on a free-threaded build that suspends the critical section,
- * and another thread can take the same slot. */
-static void close_apply_abortive(int fd) {
+ * the caller already holds the ring critical section. do not drop the
+ * GIL here: on a free-threaded build that suspends the critical section,
+ * and another thread can take the same slot. nothing clears this option. */
+void fd_arm_abortive(int fd) {
     struct linger linger;
 
+    if (fd < 0) {
+        return;
+    }
     linger.l_onoff = 1;
     linger.l_linger = 0;
     (void)setsockopt(fd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger));
+}
+
+void completion_arm_abortive_close(UringApiCompletion *completion) {
+    UringApiCompletionScalarState *scalar;
+
+    if (completion->kind != URING_API_PENDING_CLOSE) {
+        return;
+    }
+    scalar = UringApiCompletion_get_scalar_state(completion);
+    assert(scalar != NULL);
+    if ((scalar->flags & URING_API_CLOSE_ABORTIVE) == 0) {
+        return;
+    }
+    fd_arm_abortive(scalar->fd);
 }
 
 struct nowait_close_arg {
@@ -180,11 +196,10 @@ static void prep_close_sqe(struct io_uring_sqe *sqe, void *arg) {
     struct nowait_close_arg *prep = arg;
 
     /* got == 1: this slot is taken. must_park and a missed slot never
-     * call prep, and a drain error returns before it. publish runs
-     * after prep, so the option is set before the kernel can see the
-     * close. a publish failure still has this SQE filled. */
+     * call prep. a defer builds a completion and arms when that close
+     * is accepted. */
     if (prep->abortive) {
-        close_apply_abortive(prep->fd);
+        fd_arm_abortive(prep->fd);
     }
     io_uring_prep_close(sqe, prep->fd);
 }
@@ -249,6 +264,7 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
 int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     struct nowait_close_arg prep;
     int result;
+    int discharge = 0;
 
     prep.fd = fd;
     prep.abortive = abortive;
@@ -256,8 +272,25 @@ int try_direct_close_nowait(UringApiRing *self, int fd, int abortive) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
+        UringApiFdSlot *slot = fd_table_lookup(self, fd);
+
+        /* nothing in progress: this close leaves the slot. a posted SQE
+         * sets SO_LINGER and drops the mark. a full SQ builds a
+         * completion; that prepare sets the option when it is accepted
+         * and drops the mark then. a busy fd parks on the FIFO. */
+        if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
+            prep.abortive = 1;
+            discharge = 1;
+        }
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_CLOSE, fd,
                                       prep_close_sqe, &prep);
+        if (result > 0 && discharge) {
+            slot = fd_table_lookup(self, fd);
+            if (slot != NULL && slot->abortive) {
+                slot->abortive = 0;
+                fd_table_try_free(self, slot);
+            }
+        }
         if (result > 0) {
             ring_note_publish_sqe(self, 0);
         }
@@ -276,6 +309,13 @@ int try_direct_shutdown_nowait(UringApiRing *self, int fd, int how) {
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
+        UringApiFdSlot *slot = fd_table_lookup(self, fd);
+
+        /* same as a waitable shutdown: an idle abortive slot submits -1.
+         * the advisory fd on the SQE stays the caller's descriptor. */
+        if (slot != NULL && slot->abortive && slot->active == NULL && slot->fifo.count == 0) {
+            prep.fd = -1;
+        }
         result = nowait_post_or_defer(self, nowait_fd_op_must_park(self, fd), (unsigned int)URING_API_PENDING_SHUTDOWN,
                                       fd, prep_shutdown_sqe, &prep);
         if (result > 0) {
@@ -369,6 +409,14 @@ int fill_link_timeout(UringApiRing *self, UringApiCompletion *completion, struct
     return 0;
 }
 
+/* prepare failed before this completion was accepted. a poison bit copied
+ * on the way through must not stick to an object the caller will retry. */
+static void undo_unaccepted_poison(UringApiCompletion *completion, int poisoned_here, int from_parked) {
+    if (poisoned_here && !from_parked && !completion_is_accepted(completion)) {
+        completion_clear_bit(completion, URING_API_C_FD_POISON);
+    }
+}
+
 /* Caller holds the ring critical section. On success the completion is in the
  * kernel SQ or on that fd's conflict FIFO. The ring holds one reference:
  * taken at SQ fill, or adopted by the FIFO at park. Moving it between those
@@ -386,6 +434,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     UringApiCompletionSockaddrState *sockaddr_state;
     struct io_uring_sqe *sqe;
     UringApiFdSlot *send_all_slot = NULL;
+    int poisoned_here = 0;
+    int discharge_close = 0;
 
     if (!constructed_kind_ready(completion)) {
         PyErr_SetString(PyExc_ValueError, "prepare() only accepts constructed completions");
@@ -408,16 +458,22 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
-    /* a busy fd parks. the send_all completion copies the FIFO later. */
+    /* a busy fd parks. an idle slot, including an abortive one, does not.
+     * the send_all completion copies the FIFO later. */
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
     }
+    /* leaving the slot: copy poison or the close bit before the SQE.
+     * a shortfall below has not accepted this op, except a parked copy
+     * which is already on the FIFO. */
+    stage_a_copy_abortive(self, completion, &poisoned_here, &discharge_close);
 
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL);
         send_all_slot = fd_table_get(self, view_state->fd);
         if (!send_all_slot) {
+            undo_unaccepted_poison(completion, poisoned_here, from_parked);
             return -1;
         }
     }
@@ -428,12 +484,14 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         int reserved = reserve_link_timeout_sqes(self, flush_if_full, submitted_out);
 
         if (reserved < 0) {
+            undo_unaccepted_poison(completion, poisoned_here, from_parked);
             if (send_all_slot) {
                 fd_table_try_free(self, send_all_slot);
             }
             return -1;
         }
         if (reserved != 1) {
+            undo_unaccepted_poison(completion, poisoned_here, from_parked);
             return prepare_sq_short(self, send_all_slot);
         }
     }
@@ -442,12 +500,14 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         int got = get_sqe_try(self, flush_if_full, submitted_out, &sqe);
 
         if (got < 0) {
+            undo_unaccepted_poison(completion, poisoned_here, from_parked);
             if (send_all_slot) {
                 fd_table_try_free(self, send_all_slot);
             }
             return -1;
         }
         if (got == 0) {
+            undo_unaccepted_poison(completion, poisoned_here, from_parked);
             return prepare_sq_short(self, send_all_slot);
         }
     }
@@ -455,8 +515,8 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     case URING_API_PENDING_SEND:
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->has_view);
-        io_uring_prep_send(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
-                           (int)recvsend_msg_flags(view_state->flags));
+        io_uring_prep_send(sqe, completion_sqe_fd(completion, view_state->fd), view_state->view.buf,
+                           (size_t)view_state->view.len, (int)recvsend_msg_flags(view_state->flags));
         recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_SEND_ALL:
@@ -465,6 +525,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         if (send_all_fill_sqe(self, completion, sqe, 0) < 0) {
             /* do not submit a half-filled slot, and do not leave a lone link. */
             self->ring.sq.sqe_tail--;
+            undo_unaccepted_poison(completion, poisoned_here, from_parked);
             if (send_all_slot) {
                 fd_table_try_free(self, send_all_slot);
             }
@@ -474,8 +535,14 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     case URING_API_PENDING_SEND_ZC:
         view_state = UringApiCompletion_get_view_state(completion);
         assert(view_state != NULL && view_state->has_view);
-        io_uring_prep_send_zc(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
-                              (int)recvsend_msg_flags(view_state->flags), view_state->zc_flags);
+        /* a poisoned fd is one copying send. there is no NOTIF. */
+        if (completion_has_bit(completion, URING_API_C_FD_POISON)) {
+            io_uring_prep_send(sqe, completion_sqe_fd(completion, view_state->fd), view_state->view.buf,
+                               (size_t)view_state->view.len, (int)recvsend_msg_flags(view_state->flags));
+        } else {
+            io_uring_prep_send_zc(sqe, view_state->fd, view_state->view.buf, (size_t)view_state->view.len,
+                                  (int)recvsend_msg_flags(view_state->flags), view_state->zc_flags);
+        }
         recvsend_apply_ioprio(sqe, view_state->flags);
         break;
     case URING_API_PENDING_RECV:
@@ -514,13 +581,19 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     case URING_API_PENDING_SENDMSG:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
-        io_uring_prep_sendmsg(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+        io_uring_prep_sendmsg(sqe, completion_sqe_fd(completion, msg_state->fd), &msg_state->msg,
+                              recvsend_msg_flags(msg_state->flags));
         recvsend_apply_ioprio(sqe, msg_state->flags);
         break;
     case URING_API_PENDING_SENDMSG_ZC:
         msg_state = UringApiCompletion_get_msg_state(completion);
         assert(msg_state != NULL && msg_state->has_view);
-        io_uring_prep_sendmsg_zc(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+        if (completion_has_bit(completion, URING_API_C_FD_POISON)) {
+            io_uring_prep_sendmsg(sqe, completion_sqe_fd(completion, msg_state->fd), &msg_state->msg,
+                                  recvsend_msg_flags(msg_state->flags));
+        } else {
+            io_uring_prep_sendmsg_zc(sqe, msg_state->fd, &msg_state->msg, recvsend_msg_flags(msg_state->flags));
+        }
         recvsend_apply_ioprio(sqe, msg_state->flags);
         break;
     case URING_API_PENDING_CONNECT:
@@ -617,7 +690,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         UringApiCompletionScalarState *scalar_state = UringApiCompletion_get_scalar_state(completion);
 
         assert(scalar_state != NULL);
-        io_uring_prep_shutdown(sqe, scalar_state->fd, scalar_state->how);
+        io_uring_prep_shutdown(sqe, completion_sqe_fd(completion, scalar_state->fd), scalar_state->how);
         break;
     }
     case URING_API_PENDING_SOCKET: {
@@ -652,6 +725,7 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
      * slot untouched. a parked copy that cannot fill its timer fails the
      * drain: nothing retries that FIFO. */
     if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
+        undo_unaccepted_poison(completion, poisoned_here, from_parked);
         if (send_all_slot) {
             fd_table_try_free(self, send_all_slot);
         }
@@ -659,15 +733,15 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     /* the close SQE stays queued: no timer, or the timeout SQE was filled.
      * a rolled-back timeout drops the op above and leaves the option
-     * unset. the abortive bit remains, so a later fill still applies it.
-     * do not apply inside the switch: fill_link_timeout can still unwind
-     * this slot. */
+     * unset. the abortive bit on the completion remains, so a later fill
+     * still applies it. do not apply inside the switch: fill_link_timeout
+     * can still unwind this slot. */
     if (completion->kind == URING_API_PENDING_CLOSE) {
         UringApiCompletionScalarState *close_state = UringApiCompletion_get_scalar_state(completion);
 
         assert(close_state != NULL);
         if (close_state->flags & URING_API_CLOSE_ABORTIVE) {
-            close_apply_abortive(close_state->fd);
+            fd_arm_abortive(close_state->fd);
         }
     }
     if (!completion_counts_pending(completion)) {
@@ -698,6 +772,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
             }
             ring_note_publish_sqe(self, waitable);
         }
+        if (discharge_close) {
+            stage_a_discharge_close(self, completion);
+        }
         return 0;
     }
     sqe_set_completion(self, sqe, (PyObject *)completion);
@@ -717,6 +794,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
         send_all_commit_leg(self, completion, 0);
+    }
+    if (discharge_close) {
+        stage_a_discharge_close(self, completion);
     }
     return 0;
 }

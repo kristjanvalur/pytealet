@@ -162,9 +162,10 @@ typedef struct UringApi_CAPI {
     PyObject *(*ring_construct_poll_remove)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_cancel)(PyObject *ring, PyObject *target_completion, PyObject *user_data);
     PyObject *(*ring_construct_shutdown)(PyObject *ring, int fd, int how, PyObject *user_data);
-    /* Python abortive=True sets SO_LINGER {l_onoff=1, l_linger=0} when the
-     * close SQE is filled. This slot stays non-abortive. A close parked
-     * behind a failed send-all sets the same option at fill. */
+    /* Records the close. abortive=True on the Python helpers sets
+     * SO_LINGER {l_onoff=1, l_linger=0} when that close is accepted onto
+     * the conflict FIFO or an SQE. This slot stays non-abortive. A nowait
+     * send-all failure and ring_abort_queue set the same option then. */
     PyObject *(*ring_construct_close)(PyObject *ring, int fd, PyObject *user_data);
     PyObject *(*ring_construct_read)(PyObject *ring, int fd, PyObject *buf, unsigned long long offset,
                                      PyObject *user_data);
@@ -291,6 +292,13 @@ typedef struct UringApi_CAPI {
      * FIFO copy that completion starts, still flush. An enter the kernel
      * rejects is OSError. */
     int (*ring_make_room)(PyObject *ring, int *value);
+    /* Mark the pipeline this completion belongs to and set SO_LINGER
+     * {1, 0}. Then cancel the in-progress send_all. Stores 1 in
+     * *cancelled when that cancel was posted, 0 when the completion was
+     * found but no send_all is in progress, or on a miss. A found slot
+     * stays abortive. Returns 0, or -1 with an exception. The ring does
+     * not submit a close. */
+    int (*ring_abort_queue)(PyObject *ring, PyObject *completion, int *cancelled);
 } UringApi_CAPI;
 
 /* Import helper for clients. Returns NULL and sets exception on failure. */
