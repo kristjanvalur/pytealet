@@ -427,10 +427,9 @@ The result is how many bytes that call accepted. A short count is success.
 `scheduler.io.sock_sendall_cb(sock, data, callback)` is that submit with
 `callback(result, exception)` on the scheduler through `call_on_scheduler`:
 inline on a live turn, otherwise queued and the driver woken. The pair is
-the one `send_all` reports (the full length on success, `(None, exception)`
-on failure). `SendBuffer` completes its waited send leg with this callback.
-`drain`, `flush`, and `write_eof` use `sock_send_nowait` (`skip_success` +
-error callback).
+the one `send_all` reports: the submitted length, including when the send
+fails. `SendBuffer` uses this for `drain`, `write_eof`, and the `close`
+tail.
 
 `scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
 an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
@@ -441,9 +440,11 @@ after an in-flight `send_all`.
 `scheduler.io.sock_shutdown_nowait(sock, how)` is `proactor.shutdown_nowait`
 (uring direct SQE, or a nowait completion parked on the same-fd conflict
 FIFO; selector queues behind an in-flight send). It returns `None`.
-`SendBuffer.write_eof` uses the nowait helper. `TealetSocket.shutdown` waits
+`SendBuffer.write_eof` uses `sock_shutdown_cb`. `TealetSocket.shutdown` waits
 on `sock_shutdown`.
-`scheduler.io.sock_close_cb(sock, callback)` submits `Proactor.close_socket`.
+`scheduler.io.sock_close_wait(sock)` is the same `close_socket` submit with
+an `IOWaiter`. `scheduler.io.sock_close_cb(sock, callback)` submits
+`Proactor.close_socket`.
 The fd is detached at submit. `callback(None, exception)` runs on the
 scheduler, after an in-flight send or shutdown on that socket.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
@@ -486,7 +487,8 @@ callers stay on the same path.
 `Proactor.send_all(sock, data, callback, *, expect=IoExpect.READY)`
 drains the buffer and calls back `(nbytes, exception)`. `nbytes` is the full
 length of `data`. A short kernel send is re-armed inside the operation and
-is not a separate callback. Failures call back `(None, exception)`.
+is not a separate callback. Failures call back `(nbytes, exception)` with
+that same length.
 `IoExpect.READY`
 means the first attempt may complete now (uring omits `POLL_FIRST` on the
 first SQE). `IoExpect.BLOCK` means wait (uring sets `POLL_FIRST` when
@@ -500,8 +502,8 @@ only on failure. Uring uses `send_all` with `skip_success` when `callback`
 is set, and `skip_all` (errors to `nowait_error_handler`) when it is not.
 Selector arms `send_all` and ignores success. Follow nowait send with uring
 `shutdown_nowait` / `close_socket_nowait` on the same fd (conflict FIFO).
-`scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` drain/flush
-pass an error callback that makes the send error sticky and closes the socket.
+`scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` does not use
+it: `drain` submits a counted `sock_sendall_cb`.
 
 `Proactor.send_close_nowait(sock, data, *, expect=IoExpect.READY)` drains
 `data` then nowait-closes the socket. It returns `None` (no waitable).
@@ -509,9 +511,9 @@ Uring prepares nowait `send_all` then nowait close on the same-fd conflict
 FIFO; selector closes after send completion. Do not send again on that
 socket. Later failures go to the delivery exception handler.
 `scheduler.io.sock_send_close` is a pass-through, matching `sock_close`
-vs `close_socket_nowait`.
-`StreamWriter.wait_closed()` uses it for queued bytes (or closes when the
-in-flight send finishes) and does not park the handler tealet.
+vs `close_socket_nowait`. `StreamWriter.wait_closed()` does not use it.
+The writer parks on `SendBuffer.wait_closed()`, which waits for
+`sock_close_cb`.
 
 `Proactor.recv` invokes `callback(RecvResult, exception)`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
@@ -1274,15 +1276,14 @@ for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
-`SendBuffer`. `write()` submits `sock_sendall_cb` once pending bytes reach
-`min_write`, and that completion chains the next chunk the same way.
-`write()` + `drain()` below high-water submits `sock_send_nowait` (uring
-`skip_success` `send_all`; send errors close the socket). `flush()` and
-`write_eof()` use that nowait submit too.
-`close()` rejects further writes; `wait_closed()` submits remaining bytes
-via `sock_send_close` (or closes when an in-flight send finishes) and does
-not park. Idle writers `sock_close`. Later send errors go to the delivery
-exception handler.
+`SendBuffer`. `write()` only appends. `drain()` submits one counted
+`sock_sendall_cb` for the backlog and parks only while the in-flight count
+is above the high water mark. `write_eof()` sends that backlog and submits
+`sock_shutdown_cb` (`SHUT_WR`) behind it. `close()` sends any tail, submits
+`sock_close_cb`, and does not park. `wait_closed()` parks until that close
+has completed. A failed send stores the error and subtracts the length
+`send_all` reported, so a waiter does not stay parked. The buffer does not
+close the socket itself.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to

@@ -111,12 +111,11 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
             timer.mark("drain_out")
             writer.close()
             timer.mark("close")
-            # Split shutdown: flush (parks) vs sock_close (forget, should be ~0).
-            # StreamServer also wait_closed() in finally (cheap once closed).
-            writer.flush()
-            timer.mark("flush")
+            # wait_closed parks until the close completion. Counted sends
+            # are ahead of that close. StreamServer also wait_closed() in
+            # finally, which returns once this one has.
             writer.wait_closed()
-            timer.mark("sock_close")
+            timer.mark("wait_closed")
             timer.finish()
             return
         if diag_enabled():

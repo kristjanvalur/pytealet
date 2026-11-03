@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Microbenchmark: sock_sendall and SendBuffer write/drain/flush.
+"""Microbenchmark: sock_sendall and SendBuffer write/drain.
 
-``SendBuffer.write()`` submits each leg through ``scheduler.io.sock_sendall``.
-When the socket accepts the buffer immediately, the leg completes as
-``IOWaiterSync`` and ``_on_leg_complete`` chains the next chunk without a
-proactor park. That keeps ``pending_bytes`` down, so ``drain()`` often returns
-without blocking (it only parks above ``high_water``). ``flush()`` still waits
-for the queue to empty, but each leg is cheaper when eager.
+``write()`` only queues. ``drain()`` submits the backlog and parks when
+more than the high water mark is in flight.
 
 Usage::
 
@@ -102,14 +98,14 @@ def _bench_sock_sendall(
     return samples
 
 
-def _bench_send_buffer_flush(
+def _bench_send_buffer(
     *,
     iterations: int,
     chunk_bytes: int,
     chunks: int,
     uring: bool,
 ) -> list[int]:
-    """Time write(N chunks) + drain/flush on ``SendBuffer`` (stream writer path)."""
+    """Time write(N chunks) + drain on ``SendBuffer`` (stream writer path)."""
 
     samples: list[int] = []
     chunk = b"y" * chunk_bytes
@@ -147,7 +143,6 @@ def _bench_send_buffer_flush(
                         send_buffer.write(chunk)
                         # same pattern as stream writers: write then drain pressure
                         send_buffer.drain()
-                    send_buffer.flush()
                     samples.append(_ns() - t0)
                     reader_task.wait()
                     assert received == total, f"got {received} expected {total}"
@@ -209,19 +204,19 @@ def main() -> None:
         _summarise("sock_sendall", samples)
 
     if args.path in ("buffer", "both"):
-        _bench_send_buffer_flush(
+        _bench_send_buffer(
             iterations=args.warmup,
             chunk_bytes=args.chunk_size,
             chunks=args.chunks,
             uring=args.uring,
         )
-        samples = _bench_send_buffer_flush(
+        samples = _bench_send_buffer(
             iterations=args.iterations,
             chunk_bytes=args.chunk_size,
             chunks=args.chunks,
             uring=args.uring,
         )
-        _summarise("SendBuffer write+drain+flush", samples)
+        _summarise("SendBuffer write+drain", samples)
 
 
 if __name__ == "__main__":

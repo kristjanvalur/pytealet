@@ -386,14 +386,20 @@ def _recv_cqe(completion, user_cb, extra) -> None:
     user_cb(RecvResult(bytes(buf[:res]), _cqe_io_more(completion)), None)
 
 
-def _send_all_cqe(completion, user_cb, _extra) -> None:
-    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, ())``."""
+def _send_all_cqe(completion, user_cb, extra) -> None:
+    """send_all shaper.
+
+    A counted ``send_all`` stores ``(nbytes,)`` and reports that submitted
+    length on failure. A nowait send stores ``()`` and still reports
+    ``(None, exception)``.
+    """
 
     if _cancel_or_remove_cqe(completion):
         return
+    accounted = extra[0] if extra else None
     res = completion.res
     if res < 0:
-        user_cb(None, _uring_cqe_oserror(res))
+        user_cb(accounted, _uring_cqe_oserror(res))
         return
     # result is the full offset across legs. res is that total clamped to INT_MAX.
     total = completion.result if completion.result is not None else res
@@ -899,7 +905,8 @@ class Proactor(Protocol):
         """Drain ``data``. ``callback(nbytes, exception)``.
 
         ``nbytes`` is the full length of ``data``. A short kernel send is
-        re-armed inside the operation. Failures call ``callback(None, exception)``.
+        re-armed inside the operation. Failures call ``callback(nbytes, exception)``
+        with that same length.
         """
         ...
 
@@ -1774,12 +1781,20 @@ class SelectorProactor(ProactorBase):
 
         ``nbytes`` is the full length of ``data``. ``expect`` is ignored on
         the selector path (the socket is already polled for ``EVENT_WRITE``).
-        Failures call ``callback(None, exception)``.
+        Failures call ``callback(nbytes, exception)`` with that same length.
         """
 
         del expect
-        operation = _spawn_operation("send_all", callback)
         view = memoryview(data)
+        accounted = len(view)
+
+        def report(nbytes: object, exception: BaseException | None) -> None:
+            if exception is not None:
+                callback(accounted, exception)
+                return
+            callback(nbytes, exception)
+
+        operation = _spawn_operation("send_all", report)
         offset = 0
 
         def attempt() -> int:
@@ -3258,14 +3273,20 @@ class UringProactor(ProactorBase):
         CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
         Later legs always use ``POLL_FIRST`` in C when probed. Failures call
-        ``callback(None, exception)``.
+        ``callback(nbytes, exception)`` with ``nbytes`` the length of ``data``.
         """
 
         if not data:
             callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
-        completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, ()))
+        accounted = len(memoryview(data))
+        completion = self._ring.construct_send_all(
+            sock.fileno(),
+            data,
+            flags,
+            (_send_all_cqe, callback, (accounted,)),
+        )
         self._ring.prepare(completion)
         return completion
 

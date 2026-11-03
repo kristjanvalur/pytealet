@@ -196,6 +196,7 @@ class SocketIO(Protocol):
     ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
     ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` deliver
     ``callback(result, exception)`` on the scheduler and return ``None``.
+    ``sock_close_wait`` is the parking close.
     ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
     nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
@@ -316,6 +317,8 @@ class SocketIO(Protocol):
     def sock_shutdown_cb(self, sock: socket.socket, how: int, callback: _IoCallback) -> None: ...
 
     def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
+
+    def sock_close_wait(self, sock: socket.socket) -> IOWaiter[None]: ...
 
     def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None: ...
 
@@ -824,12 +827,11 @@ class ProactorIOManager:
     ) -> None:
         """Drain ``data``. ``callback(result, exception)`` runs on the scheduler.
 
-        Same submit as ``sock_sendall``, without a progress callback.
-        ``call_on_scheduler`` runs the callback inline on a live turn, and
-        otherwise queues it and wakes the driver. The callback receives the
-        ``send_all`` pair: the full length on success, and ``(None, exception)``
-        on failure. A later shutdown or close on this socket waits on the fd
-        FIFO. Callers that must cancel keep the ``OpHandle`` from
+        Same submit as ``sock_sendall``. ``call_on_scheduler`` runs the
+        callback inline on a live turn, and otherwise queues it and wakes
+        the driver. The callback receives the submitted length, including
+        when the send fails. A later shutdown or close on this socket waits
+        on the fd FIFO. Callers that must cancel keep the ``OpHandle`` from
         ``proactor.send_all``.
         """
 
@@ -915,12 +917,23 @@ class ProactorIOManager:
 
         self.proactor.shutdown_nowait(sock, how)
 
+    def sock_close_wait(self, sock: socket.socket) -> IOWaiter[None]:
+        """Submit ``close`` and return a waiter. The completion means ``close`` has finished.
+
+        Parks on the same-fd conflict FIFO behind an in-flight send or shutdown.
+        ``sock_close`` remains the nowait submit.
+        """
+
+        waiter: IOWaiter[None] = IOWaiter(self)
+        return waiter.bind(self.proactor.close_socket(sock, waiter.complete))
+
     def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None:
         """Submit ``close``. ``callback(None, exception)`` runs on the scheduler.
 
-        The fd is detached at submit. The socket FIFO runs this after an
-        in-flight send or shutdown. ``sock_close`` remains the nowait submit.
-        There is no cancel handle: the descriptor is already released.
+        Same submit as ``sock_close_wait``. The fd is detached at submit.
+        The socket FIFO runs this after an in-flight send or shutdown.
+        ``sock_close`` remains the nowait submit. There is no cancel handle:
+        the descriptor is already released.
         """
 
         self.proactor.close_socket(sock, self._callback_on_scheduler(callback))

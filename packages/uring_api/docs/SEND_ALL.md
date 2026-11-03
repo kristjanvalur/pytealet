@@ -8,7 +8,7 @@ queue or in the kernel.
 This note is why the queues are split. The user contract — pending count,
 `prepared`, lazy submit, skip flags — is in `README.md`. tealetio already
 submits stream sends through `construct_send_all`. `SendBuffer` still
-coalesces small writes; the ring op does not.
+coalesces. `write()` only queues; `drain()` submits one counted send.
 
 `IOSQE_IO_LINK` is not a substitute: you cannot pre-build N linked sends for
 one buffer, and linking send+close would close after a partial first send.
@@ -442,8 +442,9 @@ may publish. Do not set `DEFER_TASKRUN` for a worker that enters.
 
 ## What stays in tealetio
 
-`SendBuffer` still coalesces. One nowait send-all per tiny `write()` would
-defeat `min_write` and multiply SQEs.
+`SendBuffer` still coalesces. `write()` only queues. `drain()`,
+`write_eof()`, and the `close()` tail each submit one counted `send_all`
+for the whole backlog.
 
 `UringProactor` stream send, including `send_close_nowait`, is
 `construct_send_all`. Close parks on the conflict FIFO. `pending_count()`
@@ -646,6 +647,7 @@ ring critical section already serialises who writes an SQE.
 7. **v1 is copying send only** — zc is a second lifetime protocol.
 8. **Nowait send-all still counts as pending** until terminal.
 9. **tealetio calls `construct_send_all`.** `SendBuffer` still coalesces.
+   `write()` does not submit.
 10. **Do not default `SINGLE_ISSUER`.** Any thread may prepare into a
     free slot. A full SQ with `make_room` on enters and is `OSError` if
     the kernel rejects it. `make_room` off is `SubmissionQueueFull` with

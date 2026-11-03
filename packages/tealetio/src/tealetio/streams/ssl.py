@@ -476,13 +476,9 @@ class SSLStream:
             self.write(line)
 
     def drain(self) -> None:
-        """Flush any pending outgoing BIO bytes and the inner writer send buffer."""
+        """Push any pending outgoing BIO bytes through the inner ``drain()``."""
 
         self._flush_outgoing()
-
-    def flush(self) -> None:
-        self._flush_outgoing()
-        self._writer.flush()
 
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._writer.set_write_buffer_limits(high, low)

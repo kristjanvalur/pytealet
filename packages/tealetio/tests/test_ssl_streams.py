@@ -565,9 +565,6 @@ class _NullWriteStream:
     def drain(self) -> None:
         return
 
-    def flush(self) -> None:
-        return
-
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         return
 

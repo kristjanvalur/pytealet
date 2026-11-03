@@ -114,7 +114,7 @@ class TestStreamsPoC:
             def exercise() -> bytes:
                 scheduler.spawn(client_side)
                 line = run_coro(echo_handler())
-                # drain() is nowait send_all; the SQE is flushed on the next wait
+                # the send SQE is flushed on the next wait
                 assert scheduler.io.sock_recv(client, 16).wait() == b"PING\n"
                 return line
 
@@ -182,7 +182,7 @@ class TestStreamsPoC:
             def exercise() -> bytes:
                 scheduler.spawn(deliver)
                 payload = handler()
-                # drain() is nowait send_all; the SQE is flushed on the next wait
+                # the send SQE is flushed on the next wait
                 assert scheduler.io.sock_recv(writer, 8).wait() == b"ack"
                 return payload
 
@@ -823,11 +823,10 @@ class TestStreamsPoC:
                 io=scheduler.io,
             )
             stream_writer.write(b"xy")
-            stream_writer.close()
-            assert stream_writer.is_closing()
-            assert stream_writer._sock.fileno() != -1
 
             def finish_close() -> bytes:
+                stream_writer.close()
+                assert stream_writer.is_closing()
                 stream_writer.wait_closed()
                 data = scheduler.io.sock_recv(peer, 2).wait()
                 while stream_writer._sock.fileno() != -1:
@@ -867,20 +866,19 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
-    def test_stream_writer_wait_closed_uses_send_close_for_queued_bytes(self, scheduler: SyncProactorScheduler) -> None:
+    def test_stream_writer_wait_closed_sends_queued_bytes(self, scheduler: SyncProactorScheduler) -> None:
         conn, peer = socket.socketpair()
         try:
             conn.setblocking(False)
             peer.setblocking(False)
             sent: list[bytes] = []
-            real = scheduler.io.sock_send_close
+            real = scheduler.io.sock_sendall_cb
 
-            def track_send_close(sock: socket.socket, data, *, expect=None) -> None:
-                del expect
+            def track_sendall(sock: socket.socket, data, callback) -> None:
                 sent.append(bytes(data))
-                return real(sock, data)
+                real(sock, data, callback)
 
-            scheduler.io.sock_send_close = track_send_close  # type: ignore[method-assign]
+            scheduler.io.sock_sendall_cb = track_sendall  # type: ignore[method-assign]
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
@@ -895,7 +893,7 @@ class TestStreamsPoC:
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
-            scheduler.io.sock_send_close = real  # type: ignore[method-assign]
+            scheduler.io.sock_sendall_cb = real  # type: ignore[method-assign]
             conn.close()
             peer.close()
 
@@ -917,19 +915,19 @@ class TestStreamsPoC:
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
             close_calls: list[socket.socket] = []
-            real_shutdown = scheduler.io.sock_shutdown_nowait
-            real_close = scheduler.io.sock_close
+            real_shutdown = scheduler.io.sock_shutdown_cb
+            real_close = scheduler.io.sock_close_cb
 
-            def track_shutdown(sock: socket.socket, how: int):
+            def track_shutdown(sock: socket.socket, how: int, callback) -> None:
                 shutdown_calls.append((sock, how))
-                return real_shutdown(sock, how)
+                real_shutdown(sock, how, callback)
 
-            def track_close(sock: socket.socket):
+            def track_close(sock: socket.socket, callback) -> None:
                 close_calls.append(sock)
-                return real_close(sock)
+                real_close(sock, callback)
 
-            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
-            scheduler.io.sock_close = track_close  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_cb = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_close_cb = track_close  # type: ignore[method-assign]
 
             def exercise() -> None:
                 stream_writer.close()

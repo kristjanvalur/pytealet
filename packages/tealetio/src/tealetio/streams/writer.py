@@ -55,8 +55,6 @@ class WriteStream(Protocol):
 
     def drain(self) -> None: ...
 
-    def flush(self) -> None: ...
-
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None: ...
 
     def can_write_eof(self) -> bool: ...
@@ -92,9 +90,6 @@ class WriterCore:
     def drain(self) -> None:
         self._send_buffer.drain()
 
-    def flush(self) -> None:
-        self._send_buffer.flush()
-
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._send_buffer.set_write_buffer_limits(high, low)
 
@@ -113,7 +108,7 @@ class WriterCore:
         self._send_buffer.write_eof()
 
     def close(self) -> None:
-        """Begin writer shutdown without waiting for queued data or socket close."""
+        """Queue the final send and a close completion. Does not park."""
 
         if self._closing or self._closed:
             return
@@ -121,29 +116,19 @@ class WriterCore:
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Submit remaining sends then close the socket without parking.
+        """Park until the close has completed.
 
-        If bytes are queued and no send is in flight, uses ``sock_send_close``
-        (sendall then nowait close). If a send is already in flight (for
-        example after ``drain()``), close runs when that drain finishes.
-        Idle writers just ``sock_close``. Does not wait for the fd to go
-        away; later send errors go to the delivery exception handler.
-
-        ``SHUT_WR`` is still only ``write_eof()``.
+        Counted sends and a ``write_eof()`` ``SHUT_WR`` are ahead of that
+        close on the socket, so they have finished too. The scheduler can
+        then exit without dropping them. ``SHUT_WR`` is still only
+        ``write_eof()``.
         """
 
         if self._closed:
             return
         if not self._closing:
             self.close()
-        pending = self._send_buffer.steal_pending()
-        if pending:
-            self._io.sock_send_close(self._sock, pending)
-            self._closed = True
-            return
-        if self._send_buffer.arm_close_when_idle():  # noqa: SIM102 — arm has side effects
-            if self._sock.fileno() != -1:
-                self._io.sock_close(self._sock)
+        self._send_buffer.wait_closed()
         self._closed = True
 
     def is_closing(self) -> bool:
@@ -227,9 +212,6 @@ class StreamWriter:
     def drain(self) -> None:
         self._core.drain()
 
-    def flush(self) -> None:
-        self._core.flush()
-
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._core.set_write_buffer_limits(high, low)
 
@@ -285,9 +267,6 @@ class AsyncStreamWriter:
     async def drain(self) -> None:
         self._core.drain()
 
-    async def flush(self) -> None:
-        self._core.flush()
-
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._core.set_write_buffer_limits(high, low)
 
@@ -306,14 +285,15 @@ def shutdown_stream_writer(
     *,
     best_effort: bool = False,
 ) -> None:
-    """Close a stream writer and finish teardown (``wait_closed``).
+    """Close a stream writer and wait until its close has completed.
 
-    ``wait_closed()`` submits remaining sends and close without parking.
+    ``wait_closed()`` parks until the close completion. Counted sends and a
+    pending ``SHUT_WR`` are ahead of that close on the socket.
 
-    When ``best_effort`` is false (normal handler cleanup), flush and transport
-    errors propagate after best-effort socket close. When true (discarded
-    accepts or failed handler spawn), an ``Exception`` from shutdown is
-    suppressed. ``KeyboardInterrupt`` and ``SystemExit`` propagate either way.
+    When ``best_effort`` is false (normal handler cleanup), transport errors
+    propagate. When true (discarded accepts or failed handler spawn), an
+    ``Exception`` from shutdown is suppressed. ``KeyboardInterrupt`` and
+    ``SystemExit`` propagate either way.
     """
 
     try:

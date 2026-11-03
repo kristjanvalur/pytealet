@@ -21,10 +21,13 @@ the scheduler's proactor backend, while keeping scheduling on `BaseScheduler`.
 and recv always submit; if a backend wants a first try (selector in particular),
 it can do that internally.
 
-Send and close on uring go through the ring (nowait `send_all`,
-`close_nowait`) so same-fd ops stay on the conflict FIFO.
+Send and close on uring go through the ring (counted `send_all`, and
+`close_socket` for the final close) so same-fd ops stay on the conflict FIFO.
 `sock_shutdown` submits `proactor.shutdown` and returns an `IOWaiter`.
-`sock_shutdown_nowait` is `shutdown_nowait`; `write_eof` uses that path.
+`sock_shutdown_cb` is that submit with a scheduler callback.
+`sock_shutdown_nowait` is `shutdown_nowait`. `write_eof` uses
+`sock_shutdown_cb`. `close` uses `sock_close_cb`, submitted behind that
+shutdown. `wait_closed` waits for the close completion.
 There is no manager-side stdlib `send` / `shutdown`. Selector still uses
 stdlib send/shutdown inside the selector backend.
 
@@ -33,8 +36,8 @@ stdlib send/shutdown inside the selector backend.
 | Kind | Behaviour |
 |------|-----------|
 | `sock_send` | One `proactor.send` (`send(2)`, returns the count) |
-| `sock_sendall` | Always `proactor.send_all` (`IoExpect.READY`) |
-| `sock_sendall_cb` | Same `send_all`; `callback(result, exception)` on the scheduler |
+| `sock_sendall` | Always `proactor.send_all` (`IoExpect.READY`), returns an `IOWaiter` |
+| `sock_sendall_cb` | Same submit. `callback(nbytes, exception)` on the scheduler. No handle |
 | `sock_shutdown_cb` | `proactor.shutdown`; `callback(None, exception)` on the scheduler |
 | `sock_close_cb` | `proactor.close_socket`; `callback(None, exception)` on the scheduler |
 | `sock_send_nowait` | Pass-through to `proactor.send_nowait` (optional error callback) |
@@ -44,11 +47,13 @@ stdlib send/shutdown inside the selector backend.
 
 **Covered on the stream server/client path:**
 
-- `sock_sendall` — always `proactor.send_all`. `sock_sendall_cb` is that
-  submit with the callback on the scheduler. `SendBuffer` uses it when
-  `write()` reaches `min_write`, and when that completion chains the next
-  chunk. `drain` / `flush` / `write_eof` use `sock_send_nowait`.
-- `sock_shutdown` — `proactor.shutdown`, returns an `IOWaiter`; `sock_shutdown_nowait` — `shutdown_nowait` (`write_eof`); `sock_close` — `close_socket_nowait`
+- `sock_sendall_cb` — `proactor.send_all` with the scheduler callback.
+  Stream `drain`, `write_eof`, and the `close()` tail use it. `sock_sendall`
+  remains the parking waiter.
+- `sock_shutdown_cb` — `proactor.shutdown` (`write_eof`). `sock_shutdown`
+  returns an `IOWaiter`. `sock_shutdown_nowait` is `shutdown_nowait`.
+- `sock_close_cb` — `proactor.close_socket` (`SendBuffer.close`).
+  `sock_close_wait` is the parking form. `sock_close` is `close_socket_nowait`.
 
 **Always proactor (manager does not first-try):**
 
@@ -384,7 +389,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; oneshot `sock_sendall` tries one non-blocking `send` then hands remainder to `proactor.send_all`; `sock_shutdown` returns an `IOWaiter`; `sock_shutdown_nowait` is the nowait submit used by `write_eof`; `sock_close` via `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
+| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; `sock_sendall_cb` submits `proactor.send_all` and delivers `callback(nbytes, exception)` on the scheduler (stream `drain`, `write_eof`, `close`); `sock_sendall` returns an `IOWaiter`; `sock_shutdown_cb` is `write_eof`; `sock_shutdown` returns an `IOWaiter`; `sock_shutdown_nowait` is `shutdown_nowait`; `sock_close_cb` is `SendBuffer.close`; `sock_close` is `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
@@ -602,9 +607,9 @@ drop waiter only”.
 ## Open follow-ups
 
 - **Vector / scatter-gather send** — `SendBuffer` owns the first idle `bytes`
-  payload by reference and promotes to a `bytearray` only when coalescing;
-  drain-below-high-water is one `sock_send_nowait`; waitable legs are
-  `sock_sendall`. When `uring-api` / the proactor expose
+  payload by reference and promotes to a `bytearray` only when coalescing.
+  `drain()` / `write_eof()` submit one counted `sock_sendall_cb`
+  for the whole backlog. When `uring-api` / the proactor expose
   multi-buffer submit (`sendmsg` / writev-style, or a retained buffer list
   without join), stream writers can avoid the copy-join for large mixed write
   patterns. Until then, coalescing is the right default for common
@@ -624,11 +629,11 @@ drop waiter only”.
   signatures (`RecvBufferPool`, and similar). `IOFile` and `ServerIO` are done.
 - `StreamServer.serve_forever()` sugar (implemented); signal handling stays in
   `Runner`, not the server object.
-- **Stream writer shutdown** — `StreamWriter.close()` is non-blocking.
-  `wait_closed()` submits remaining bytes via `sock_send_close` (proactor
-  `send_close_nowait`) or closes when an in-flight send finishes, and does
-  not park. Idle writers `sock_close`. `StreamServer` handler cleanup calls
-  `wait_closed()` after `close()`.
+- **Stream writer shutdown** — `StreamWriter.close()` submits any unsent
+  bytes as a counted `sock_sendall_cb`, then `sock_close_cb`, and does not
+  park. `wait_closed()` parks until that close completion. A `write_eof()`
+  `SHUT_WR` (`sock_shutdown_cb`) is ahead of the close on the socket.
+  `StreamServer` handler cleanup calls `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
   (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain
   in `io_buffers.py`. `open` is the leaf `io_manager` imports for stream-pair
