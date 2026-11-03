@@ -1572,18 +1572,20 @@ def test_stop_serving_runs_break_wait_callback_when_available():
         assert calls == [1]
 
 
-def test_single_issuer_worker_wakes_a_parked_host_when_available():
-    """A worker that cannot submit leaves the next SQE queued and opens wait_idle."""
+def test_single_issuer_worker_enter_fails_and_leaves_the_host_parked():
+    """The callback fills a free slot. The publish enter is EEXIST and does not wake the host."""
 
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 
     left, right = socket.socketpair()
     ring: uring_api.Ring | None = None
     worker: threading.Thread | None = None
+    parked: threading.Thread | None = None
     try:
         left.setblocking(False)
         right.setblocking(False)
         prepared = threading.Event()
+        errors: list[BaseException] = []
 
         def callback(completion: uring_api.Completion) -> None:
             if completion.user_data != 1:
@@ -1592,9 +1594,16 @@ def test_single_issuer_worker_wakes_a_parked_host_when_available():
             ring.prepare_recv(left.fileno(), bytearray(4), 0, 2)
             prepared.set()
 
+        def run_worker() -> None:
+            assert ring is not None
+            try:
+                ring.serve_completions()
+            except BaseException as exc:
+                errors.append(exc)
+
         ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER)
         ring.callback = callback
-        worker = threading.Thread(target=ring.serve_completions)
+        worker = threading.Thread(target=run_worker)
         worker.start()
         wait_until_running(ring)
         ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
@@ -1605,16 +1614,25 @@ def test_single_issuer_worker_wakes_a_parked_host_when_available():
         parked.start()
         _wait_driver(ring)
         assert right.send(b"ping") == 4
-        parked.join(2.0)
-        assert parked.is_alive() is False
-        assert results == [True]
-        assert prepared.is_set()
+        assert prepared.wait(1.0)
+        worker.join(2.0)
+        assert worker.is_alive() is False
+        assert len(errors) == 1
+        assert isinstance(errors[0], OSError)
+        assert errors[0].errno == errno.EEXIST
         assert ring.stats()["submit_worker_sqes"] == 0
         assert _unpublished(ring) >= 1
-        assert ring.submit() >= 1
-        assert _unpublished(ring) == 0
+        time.sleep(0.05)
+        assert parked.is_alive() is True
+        ring.close()
+        parked.join(1.0)
+        assert parked.is_alive() is False
+        assert results == [True]
     finally:
-        if ring is not None and worker is not None:
+        if ring is not None and parked is not None and parked.is_alive():
+            ring.close()
+            parked.join(1.0)
+        if ring is not None and worker is not None and worker.is_alive():
             ring.stop_serving()
             worker.join(2.0)
         if ring is not None:
@@ -1624,11 +1642,11 @@ def test_single_issuer_worker_wakes_a_parked_host_when_available():
 
 
 def test_single_issuer_full_queue_prepare_stops_the_worker_when_available():
-    """A full SQ on a worker that must not submit raises. It does not park.
+    """A full SQ makes the worker enter. The kernel returns EEXIST.
 
-    Nowait closes fill the queue and do not wake the host. The following
-    recv has no slot, so the callback fails and that worker stops. The
-    host stays inside wait_idle. Closing the ring opens that park.
+    Nowait closes fill free slots. The following recv has no slot, so
+    make_room enters from the callback and that worker stops. The host
+    stays inside wait_idle. Closing the ring opens that park.
     """
 
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
@@ -1679,8 +1697,8 @@ def test_single_issuer_full_queue_prepare_stops_the_worker_when_available():
         worker.join(2.0)
         assert worker.is_alive() is False
         assert len(errors) == 1
-        assert isinstance(errors[0], RuntimeError)
-        assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
+        assert isinstance(errors[0], OSError)
+        assert errors[0].errno == errno.EEXIST
         assert ring.stats()["submit_worker_sqes"] == 0
         time.sleep(0.05)
         assert parked.is_alive() is True
@@ -1707,7 +1725,7 @@ def test_single_issuer_full_queue_prepare_stops_the_worker_when_available():
 
 
 def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
-    """A registered callback runs even though the host is not inside wait_idle."""
+    """The delivery callback runs. The publish enter fails and does not call break_wait_callback."""
 
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 
@@ -1719,6 +1737,7 @@ def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
         right.setblocking(False)
         prepared = threading.Event()
         wakes: list[int] = []
+        errors: list[BaseException] = []
 
         def callback(completion: uring_api.Completion) -> None:
             if completion.user_data != 1:
@@ -1730,24 +1749,33 @@ def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
         def wake() -> None:
             wakes.append(1)
 
+        def run_worker() -> None:
+            assert ring is not None
+            try:
+                ring.serve_completions()
+            except BaseException as exc:
+                errors.append(exc)
+
         ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER)
         ring.callback = callback
         ring.break_wait_callback = wake
-        worker = threading.Thread(target=ring.serve_completions)
+        worker = threading.Thread(target=run_worker)
         worker.start()
         wait_until_running(ring)
         ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
         assert ring.submit() >= 1
         assert right.send(b"ping") == 4
         assert prepared.wait(1.0)
-        deadline = time.monotonic() + 1.0
-        while not wakes and time.monotonic() < deadline:
-            time.sleep(0.001)
-        assert wakes == [1]
+        worker.join(2.0)
+        assert worker.is_alive() is False
+        assert len(errors) == 1
+        assert isinstance(errors[0], OSError)
+        assert errors[0].errno == errno.EEXIST
+        assert wakes == []
         assert ring.wait_idle(0) is False
         assert _unpublished(ring) >= 1
     finally:
-        if ring is not None and worker is not None:
+        if ring is not None and worker is not None and worker.is_alive():
             ring.stop_serving()
             worker.join(2.0)
         if ring is not None:

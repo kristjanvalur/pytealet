@@ -14,12 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``Ring.break_wait_callback`` is an optional callable with no arguments.
   ``break_wait()`` runs it after opening the idle park, including
   ``stop_serving()``. A call that ``skip_owner_break_wait`` drops does
-  not run it. A completion worker that must not submit, with
-  ``auto_submit`` on, uses the same callable when its handler queued a
-  waitable SQE, a housekeeping SQE, or a new conflict park.
-  With no callback, that path signals ``wait_idle`` only when the host
-  is already inside it. It does not latch a later park. A direct nowait
-  that is not parked still waits for ``submit()``.
+  not run it. It does not run because a worker filled an SQE.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
@@ -75,36 +70,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- There is no fill-wait list. A thread that must not call
-  ``io_uring_enter`` may still fill a free SQ slot. A full SQ on that
-  thread raises ``RuntimeError``. Do not set
-  ``IORING_SETUP_SINGLE_ISSUER`` when a worker needs to submit.
-  ``SQPOLL`` with that flag still lets any thread publish, because the
-  kernel thread is the issuer. The only handled submission-queue
-  condition is a full SQ. Other errors from ``io_uring_submit`` raise.
-  On the driving thread that exception leaves ``wait()``. A
-  ``serve_completions`` worker stops. A send-all next leg that cannot
-  be submitted fails that send-all (``res`` is ``-EIO``, or ``-ENOMEM``
-  for ``MemoryError``) and the same exception propagates.
-  ``exception_handler`` stays for delivery-callback exceptions. A user
-  ``prepare`` that raises inside a delivery callback is still one of
-  those. A worker that filled a free slot, or parked on a conflict
-  FIFO, still wakes the host through ``break_wait_callback`` when
-  ``auto_submit`` is on. A full SQ raises and does not park, so it does
-  not wake. ``Ring.stats()`` no longer has ``next_leg_park``. The C
+- There is no fill-wait list, and no userspace check of which thread
+  may enter. A thread may still fill a free SQ slot. A full SQ with
+  ``make_room`` on enters. An enter the kernel rejects is ``OSError``
+  with ``errno`` ``EEXIST`` (``IORING_SETUP_SINGLE_ISSUER`` from
+  another task, and ``IORING_SETUP_DEFER_TASKRUN`` for an enter that
+  submits or reaps). A full SQ with ``make_room`` off raises
+  ``SubmissionQueueFull`` and does not enter. Do not set
+  ``SINGLE_ISSUER`` without ``SQPOLL`` when a worker needs to enter,
+  and do not set ``DEFER_TASKRUN`` for a worker that enters.
+  ``SQPOLL`` with ``SINGLE_ISSUER`` still lets any thread publish,
+  because the kernel thread is the issuer. The only handled
+  submission-queue condition is a full SQ. Other errors from
+  ``io_uring_submit`` raise. On the driving thread that exception
+  leaves ``wait()``. A ``serve_completions`` worker stops. A send-all
+  next leg that cannot be submitted fails that send-all (``res`` is
+  ``-EIO``, or ``-ENOMEM`` for ``MemoryError``) and the same exception
+  propagates. ``exception_handler`` stays for delivery-callback
+  exceptions. A user ``prepare`` that raises inside a delivery
+  callback is still one of those. ``break_wait()`` does not pre-check
+  the setup flags. With nobody inside ``io_uring_enter`` it returns
+  without entering, and a NOP it cannot submit is dropped.
+  ``Ring.stats()`` no longer has ``next_leg_park``. The C
   ``UringApiRingStats`` field of that name is gone. The C API ABI
   version stays 1.
+- A send-all completion is the only conflict-FIFO drain. It copies
+  until the next send-all is active or the FIFO is empty, and a full
+  queue enters. ``make_room`` is not consulted. ``prepare()``,
+  ``submit()``, and ``wait()`` do not walk that FIFO. If making room
+  fails, ``wait()`` raises and a ``serve_completions`` worker stops.
+  The head is not left queued.
 - ``make_room`` is fixed when the ring is created and is independent of
   ``auto_submit``. Both default to true. When ``make_room`` is on,
   ``prepare()`` submits and waits until it can take a slot, on a plain
-  ring and under ``SQPOLL``. When it is off, a thread that may submit
-  raises ``SubmissionQueueFull``. A thread that must not submit raises
-  ``RuntimeError`` when the queue is full. A send-all next leg still
-  flushes to take a slot. A conflict-FIFO copy does not. ``Ring(auto_submit=False)``
-  still makes room. Pass ``make_room=False`` to keep a full queue for an
-  explicit ``submit()``. Assigning ``ring.make_room`` raises
-  ``AttributeError``. The C capsule reads it with ``ring_make_room``.
-  ``ring_new`` leaves it on.
+  ring and under ``SQPOLL``. An enter the kernel rejects is ``OSError``.
+  When it is off, a full queue raises ``SubmissionQueueFull`` and does
+  not enter. A send-all next leg, and the FIFO copy that completion
+  starts, still flush to take a slot. ``Ring(auto_submit=False)`` still makes
+  room. Pass ``make_room=False`` to keep a full queue for an explicit
+  ``submit()``. Assigning ``ring.make_room`` raises ``AttributeError``.
+  The C capsule reads it with ``ring_make_room``. ``ring_new`` leaves
+  it on.
 - ``auto_submit`` is fixed when the ring is created. ``Ring(auto_submit=False)``
   is the way to turn it off. Assigning ``ring.auto_submit`` raises
   ``AttributeError``. The C capsule no longer has ``ring_set_auto_submit``.
@@ -117,16 +123,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises ``AttributeError``. ``URING_API_SKIP_OWNER_BREAK_WAIT`` no longer
   overrides the constructor.
 - With ``auto_submit`` off, the application calls ``submit()`` for SQEs
-  it prepares. That is the normal rule, not a guarantee. Housekeeping is
-  still published when this thread's housekeeping flag is set: a send-all
-  next leg, and a copy off a per-fd queue. The publish copies
-  the whole unpublished tail, so an application SQE already queued can go
-  out with it. ``wait()`` keeps reaping while that publish armed another
-  leg and nothing user-visible was delivered. Making room when the
-  queue is full is the separate ``make_room`` flag. See
-  ``docs/AUTO_SUBMIT.md``. The
-  flag is cooked on the submission policy: the owner always, a worker
-  when it may ``submit()``.
+  it prepares. That is the normal rule, not a guarantee. Housekeeping
+  is still published from every thread: a send-all next leg, and a
+  copy off a per-fd queue. The publish copies the whole unpublished
+  tail, so an application SQE already queued can go out with it. An
+  enter the kernel rejects is ``OSError``. ``wait()`` keeps reaping
+  while that publish armed another leg and nothing user-visible was
+  delivered. Making room when the queue is full is the separate
+  ``make_room`` flag. See ``docs/AUTO_SUBMIT.md``.
 - ``Ring.close()`` with ``IORING_SETUP_SQPOLL`` waits until the kernel
   thread has consumed SQEs that ``submit()`` already published, then
   exits the ring. ``io_uring_queue_exit`` otherwise drops that tail, so
@@ -139,12 +143,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a plain ring. The C API passes its flags integer through, so ``0`` does
   not gain the poller.
 - With ``IORING_SETUP_SQPOLL``, ``IORING_SETUP_SINGLE_ISSUER`` does not
-  restrict which thread may ``submit()``, and it does not turn off a
-  worker's full-SQ make-room. The kernel polling thread is the issuer.
-  The ring stores that answer as ``workers_may_submit`` on its submission
-  policy, from the creation flags, and later checks read the bit.
-  ``DEFER_TASKRUN`` still pins the creating thread. The single-issuer
-  checks still apply when ``SQPOLL`` is off.
+  restrict which thread may ``submit()``. The kernel polling thread is
+  the issuer, so any thread may publish, including a full-SQ make-room
+  when ``make_room`` is on. ``DEFER_TASKRUN`` still pins submit and
+  reap to the creating thread: an enter from another thread is
+  ``OSError``. The extension does not pre-check either flag.
 - ``IORING_SETUP_SQPOLL`` keeps the same automatic publish points as a
   normal ring, including the three ``wait()`` publishes: before the
   first reap, after a burst, and before a silent repark. Each of those

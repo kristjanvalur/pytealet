@@ -9,7 +9,7 @@ and `break_wait_from_other_thread` live in `helpers.py`.
 - `test_module_exports.py`: package metadata, constant exports, header compile checks, import-without-extension fallback
 - `test_probe.py`: `probe()` behaviour and kernel version gates
 - `test_parse_keywords.py`: keyword acceptance on probe, construct, wait, and poll
-- `test_setup_flags.py`: `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN` threading contracts
+- `test_setup_flags.py`: `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN`. A forbidden `io_uring_enter` is `OSError` (`EEXIST`). A path that does not enter does not raise.
 - `test_ring_lifecycle.py`: ring create/close, `pending_count`, and invalid-parameter handling
 - `test_ring_stats.py`: `Ring.stats()` SQ/CQ and submit-path counters
 - `test_lazy_submit.py`: `submit()`, `auto_submit`, and `SubmissionQueueFull`

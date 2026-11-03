@@ -173,33 +173,6 @@ UringApiFdSlot *fd_table_get(UringApiRing *self, int fd) {
     return slot;
 }
 
-void fd_table_mark_drain(UringApiRing *self, UringApiFdSlot *slot) {
-    if (slot->on_drain_list) {
-        return;
-    }
-    slot->drain_next = self->fd_drain_head;
-    self->fd_drain_head = slot;
-    slot->on_drain_list = 1;
-}
-
-void fd_table_unlink_drain(UringApiRing *self, UringApiFdSlot *slot) {
-    UringApiFdSlot **walk;
-
-    if (!slot->on_drain_list) {
-        return;
-    }
-    walk = &self->fd_drain_head;
-    while (*walk) {
-        if (*walk == slot) {
-            *walk = slot->drain_next;
-            break;
-        }
-        walk = &(*walk)->drain_next;
-    }
-    slot->drain_next = NULL;
-    slot->on_drain_list = 0;
-}
-
 void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     UringApiFdSlot **walk;
     unsigned int bucket;
@@ -207,7 +180,6 @@ void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot) {
     if (slot->active != NULL || slot->fifo.count > 0) {
         return;
     }
-    fd_table_unlink_drain(self, slot);
     bucket = fd_hash(slot->fd, self->fd_slot_cap);
     walk = &self->fd_slots[bucket];
     while (*walk) {
@@ -267,5 +239,4 @@ void fd_table_clear(UringApiRing *self) {
     self->fd_slots = NULL;
     self->fd_slot_cap = 0;
     self->fd_slot_count = 0;
-    self->fd_drain_head = NULL;
 }

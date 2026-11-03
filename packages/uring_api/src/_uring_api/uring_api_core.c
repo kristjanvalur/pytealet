@@ -363,50 +363,15 @@ int ring_check_open(UringApiRing *self) {
     return 0;
 }
 
-static unsigned long long ring_current_thread_id(void) { return (unsigned long long)PyThread_get_thread_ident(); }
-
-static int ring_check_owner_thread(UringApiRing *self, const char *error_message, int raise_on_error) {
-    unsigned long long stored = self->owner_thread_id;
-
-    /* 0 = unset (closed). creator latches at queue_init. */
-    if (stored == 0 || stored != ring_current_thread_id()) {
-        if (raise_on_error) {
-            PyErr_SetString(PyExc_RuntimeError, error_message);
-        }
-        return -1;
-    }
-    return 0;
-}
-
-static int ring_on_owner_thread(UringApiRing *self) {
-    unsigned long long owner = self->owner_thread_id;
-
-    return owner != 0 && owner == ring_current_thread_id();
-}
-
-static int ring_policy_pick(UringApiRing *self, bool issuer_flag, bool worker_flag) {
-    if (ring_on_owner_thread(self)) {
-        return issuer_flag;
-    }
-    return worker_flag;
-}
-
 void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_room) {
     UringApiSubmissionPolicy *policy = &self->submission_policy;
     int enabled = auto_submit != 0;
     int sqpoll = (self->setup_flags & IORING_SETUP_SQPOLL) != 0;
-    int defer = (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) != 0;
-    int single = (self->setup_flags & IORING_SETUP_SINGLE_ISSUER) != 0;
-    /* DEFER_TASKRUN pins the owner. SINGLE_ISSUER does too, unless SQPOLL
-     * is set: the kernel thread submits, so a worker may publish. the
-     * kernel effect of that combination is not modelled here.
-     * auto_submit does not change this bit. */
-    int workers_may_submit = !defer && (sqpoll || !single);
-    int workers = enabled && workers_may_submit;
     /* make_room is independent of auto_submit. both default on.
      * a plain ring blocks inside the submit syscall. SQPOLL publishes,
      * then waits for the kernel thread to consume a slot. the caller
-     * sees one wait either way. */
+     * sees one wait either way. SINGLE_ISSUER and DEFER_TASKRUN are
+     * not consulted. a forbidden io_uring_enter is OSError. */
     int room = make_room != 0;
     /* same publish points with or without SQPOLL. under SQPOLL,
      * io_uring_submit copies the tail and the kernel thread issues.
@@ -416,18 +381,6 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_
 
     policy->auto_submit = enabled;
     policy->make_room = room;
-    policy->workers_may_submit = workers_may_submit;
-    policy->issuer_on_sq_full = room;
-    policy->worker_on_sq_full = room && workers_may_submit;
-    policy->issuer_before_reap = enabled;
-    policy->worker_before_reap = workers;
-    policy->issuer_callback_sqes = enabled;
-    policy->worker_callback_sqes = workers;
-    /* the owner can always publish a next leg or a parked copy.
-     * a worker can when it may submit. auto_submit does not apply:
-     * the application is not in a call that can submit these SQEs. */
-    policy->issuer_housekeeping = 1;
-    policy->worker_housekeeping = workers_may_submit;
     if (!enabled) {
         policy->callback_submit = URING_API_CALLBACK_SUBMIT_OFF;
     } else if (end_of_turn) {
@@ -437,53 +390,11 @@ void ring_submission_policy_apply(UringApiRing *self, int auto_submit, int make_
     }
 }
 
-int ring_policy_on_sq_full(UringApiRing *self) {
-    return ring_policy_pick(self, self->submission_policy.issuer_on_sq_full, self->submission_policy.worker_on_sq_full);
-}
+int ring_policy_on_sq_full(UringApiRing *self) { return self->submission_policy.make_room; }
 
-int ring_policy_before_reap(UringApiRing *self) {
-    return ring_policy_pick(self, self->submission_policy.issuer_before_reap,
-                            self->submission_policy.worker_before_reap);
-}
+int ring_policy_before_reap(UringApiRing *self) { return self->submission_policy.auto_submit; }
 
-int ring_policy_callback_sqes(UringApiRing *self) {
-    return ring_policy_pick(self, self->submission_policy.issuer_callback_sqes,
-                            self->submission_policy.worker_callback_sqes);
-}
-
-int ring_policy_housekeeping(UringApiRing *self) {
-    return ring_policy_pick(self, self->submission_policy.issuer_housekeeping,
-                            self->submission_policy.worker_housekeeping);
-}
-
-int ring_check_submit_thread(UringApiRing *self, int raise_on_error) {
-    const char *message;
-
-    /* the bit is the decision. the message still names which flag pinned it. */
-    if (self->submission_policy.workers_may_submit) {
-        return 0;
-    }
-    assert((self->setup_flags & (IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SINGLE_ISSUER)) != 0);
-    if (self->setup_flags & IORING_SETUP_DEFER_TASKRUN) {
-        message = "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the "
-                  "thread that created the ring";
-    } else {
-        message = "ring was created with IORING_SETUP_SINGLE_ISSUER; submissions must come from the thread that "
-                  "created the ring";
-    }
-    return ring_check_owner_thread(self, message, raise_on_error);
-}
-
-int ring_check_client_thread(UringApiRing *self) {
-    if (!(self->setup_flags & IORING_SETUP_DEFER_TASKRUN)) {
-        return 0;
-    }
-    return ring_check_owner_thread(
-        self,
-        "ring was created with IORING_SETUP_DEFER_TASKRUN; submissions and completions must run on the thread that "
-        "created the ring",
-        1);
-}
+int ring_policy_callback_sqes(UringApiRing *self) { return self->submission_policy.auto_submit; }
 
 /* SQEs liburing will copy on the next submit. sqe_head is the last tail it
  * published. caller holds the ring CS. this does not read ktail or khead. */
@@ -660,11 +571,8 @@ int ring_flush_internal_since(UringApiRing *self, uint64_t internal_at) {
     if (ring_thread_housekeeping_sqes() == internal_at) {
         return 0;
     }
-    /* auto_submit does not cover these. the housekeeping flag is the
-     * owner, or a worker that may submit. anyone else leaves them. */
-    if (!ring_policy_housekeeping(self)) {
-        return 0;
-    }
+    /* auto_submit does not cover these. every thread tries to publish.
+     * a setup flag the kernel rejects comes back as OSError. */
     if (self->owner_thread_id != 0 && self->owner_thread_id == (unsigned long long)PyThread_get_thread_ident()) {
         kind = URING_API_SUBMIT_MAIN;
     } else {
@@ -818,7 +726,7 @@ int sq_check_need(UringApiRing *self, unsigned int need) {
 
 /*
  * Make room for need free SQ slots. Caller holds the ring CS and has already
- * decided this thread may enter. Does not take a slot, so a caller that needs
+ * decided to enter. Does not take a slot, so a caller that needs
  * two cannot be left holding one.
  *
  * A ring smaller than need fails immediately. Flushing cannot help, and the
@@ -832,10 +740,10 @@ int sq_check_need(UringApiRing *self, unsigned int need) {
  * under the ring CS. Non-SQPOLL must free the slots after a successful
  * flush; if not, raise RuntimeError (stuck queue / dead poller — not
  * recoverable backpressure). SubmissionQueueFull is the caller's job, for
- * the case where this thread was not allowed to enter.
+ * the case where this call chose not to enter.
  *
- * The SQPOLL wait keeps the ring CS (GIL is released). Intended for
- * SINGLE_ISSUER-style exclusive submit; multi-issuer + SQPOLL serialises on CS.
+ * The SQPOLL wait keeps the ring CS (GIL is released). Submit is
+ * serialised on that section.
  */
 int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out) {
     int flush_rounds = 0;
@@ -937,11 +845,8 @@ int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submi
         return 1;
     }
     ring_note_sq_full(self);
-    /* no side queue. a thread that must not enter fails here, even when
-     * this call was not going to enter. */
-    if (ring_check_submit_thread(self, 1) < 0) {
-        return -1;
-    }
+    /* no side queue. make_room off returns without entering. a call that
+     * does enter gets OSError if this thread may not. */
     if (enter == URING_API_SQ_ENTER_POLICY) {
         if (!ring_policy_on_sq_full(self)) {
             return 0;

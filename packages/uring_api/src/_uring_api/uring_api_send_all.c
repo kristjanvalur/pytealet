@@ -80,17 +80,13 @@ static int send_all_release_active(UringApiRing *self, UringApiCompletion *compl
     if (slot != NULL && slot->active == completion) {
         slot->active = NULL;
         if (slot->fifo.count > 0) {
-            fd_table_mark_drain(self, slot);
-            /* a failed drain must not FIN. the queued close resets. */
+            /* a failed drain must not FIN. the queued close resets.
+             * this is the only FIFO copy. a full SQ enters. */
             if (completion->res < 0) {
                 fd_slot_mark_queued_closes_abortive(slot);
             }
-            {
-                int drain_ret = drain_fd_slot(self, slot, 0, NULL);
-
-                if (drain_ret < 0) {
-                    failed = 1;
-                }
+            if (drain_fd_slot(self, slot) < 0) {
+                failed = 1;
             }
         } else {
             fd_table_try_free(self, slot);
@@ -138,9 +134,9 @@ static int send_all_abort_unparked(UringApiRing *self, UringApiCompletion *compl
  * nothing filled. the caller completes the op.
  * a full SQ is the one handled case: this call always flushes, even
  * when make_room is off. there is no caller to retry. any other
- * failure, including a thread that must not enter, is not recoverable.
- * a leg that got a free slot on a thread that must not enter stays
- * unpublished until that thread's issuer calls submit(). */
+ * failure is not recoverable. a free slot is filled here; the
+ * housekeeping publish that follows tries to enter, and a setup flag
+ * the kernel rejects fails that enter. */
 static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *completion) {
     struct io_uring_sqe *sqe;
     int failed = 0;
@@ -178,8 +174,8 @@ static int send_all_try_next_leg(UringApiRing *self, UringApiCompletion *complet
             failed = 1;
             unparked = 1;
         } else if (got == 0) {
-            /* flush_if_full is set. 0 means this thread may submit and
-             * still did not enter, which this call does not ask for. */
+            /* flush_if_full is set. 0 means the call did not enter.
+             * this path always asks to enter. */
             if (!PyErr_Occurred()) {
                 PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
             }

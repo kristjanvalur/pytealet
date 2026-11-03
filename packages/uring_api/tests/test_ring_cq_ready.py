@@ -1,5 +1,6 @@
 """Ring.poll(): CQ-ready wait that does not harvest."""
 
+import errno
 import threading
 import time
 
@@ -122,12 +123,13 @@ def test_defer_taskrun_rejects_cross_thread_poll():
     flags = uring_api.IORING_SETUP_SINGLE_ISSUER | uring_api.IORING_SETUP_DEFER_TASKRUN
     require_setup_flags(flags)
     with uring_api.Ring(entries=4, flags=flags) as ring:
-        errors: list[RuntimeError] = []
+        errors: list[OSError] = []
 
         def poll_from_other_thread() -> None:
             try:
-                ring.poll(0)
-            except RuntimeError as exc:
+                # a blocking poll enters. poll(0) peeks and may not.
+                ring.poll(None)
+            except OSError as exc:
                 errors.append(exc)
 
         thread = threading.Thread(target=poll_from_other_thread)
@@ -135,4 +137,4 @@ def test_defer_taskrun_rejects_cross_thread_poll():
         thread.join(1.0)
         assert thread.is_alive() is False
         assert len(errors) == 1
-        assert "IORING_SETUP_DEFER_TASKRUN" in str(errors[0])
+        assert errors[0].errno == errno.EEXIST

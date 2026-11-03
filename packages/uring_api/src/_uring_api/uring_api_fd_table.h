@@ -7,8 +7,6 @@
 
 UringApiFdSlot *fd_table_lookup(UringApiRing *self, int fd);
 UringApiFdSlot *fd_table_get(UringApiRing *self, int fd);
-void fd_table_mark_drain(UringApiRing *self, UringApiFdSlot *slot);
-void fd_table_unlink_drain(UringApiRing *self, UringApiFdSlot *slot);
 void fd_table_try_free(UringApiRing *self, UringApiFdSlot *slot);
 /* Push adopts one reference. It does not incref. Pop returns that reference.
  * A failed push leaves the reference with the caller. */

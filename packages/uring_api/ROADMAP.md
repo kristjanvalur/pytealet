@@ -213,9 +213,10 @@ with uring_api.Ring(
   overflow: the kernel will not resize an already-overflowed CQ.
 - Grow SQ and CQ together when SQ grows, so a larger batch does not overflow
   a leftover-small CQ.
-- Non-issuer `prepare` still does **not** resize (it cannot enter). A full
-  SQ on that thread raises `RuntimeError`. The issuer's next `submit()` /
-  `wait()` can grow, then retry.
+- Non-issuer `prepare` still does **not** resize. Growing the ring
+  enters, and a forbidden enter is `OSError`. A full SQ is that error
+  when `make_room` is on, or `SubmissionQueueFull` when it is off. The
+  issuer's next `submit()` / `wait()` can grow, then retry.
 
 This is not an SQ-full FIFO. The send-all conflict FIFO stays as it is;
 auto-resize only raises the kernel rings' ceiling. Create-time
@@ -226,7 +227,8 @@ Open questions for the policy:
 
 - Grow SQ and CQ independently, or always together?
 - Trigger CQ growth from what signal, if overflow is already too late?
-- Grow only from a thread that may enter, since a non-issuer cannot resize?
+- Grow only from a thread whose enter the kernel accepts? A rejected
+  enter is `OSError`.
 - `tealetio` default once a proactor can honour single-issuer /
   single-consumer?
 
@@ -576,8 +578,9 @@ in-flight prepares. That is **not** an SQ-full FIFO: `tealetio` does not
 defer failed prepares onto a library list and retry after CQEs. Auto-resize
 (item 1) grows the kernel SQ/CQ up to `max_entries` on a single-issuer /
 single-consumer ring. The send-all conflict FIFO stays fd-busy
-serialisation, not an SQ-full queue. A thread that must not enter raises
-when the SQ is full. Normal producer
+serialisation, not an SQ-full queue. A full SQ with `make_room` off
+raises `SubmissionQueueFull` and does not enter. With `make_room` on
+the prepare enters, and a rejected enter is `OSError`. Normal producer
 flow is already limited by waitables parked on incomplete operations.
 
 ### `UringProactor` submission threading and `IORING_SETUP_SINGLE_ISSUER`
@@ -593,25 +596,25 @@ section, but the kernel still sees the calling OS thread.
 and may be passed through `UringProactor(flags=...)` after `probe(flags=...)`
 accepts it. **`UringProactor` does not enable this flag by default.** The
 kernel enforces that **submit** (`io_uring_enter`) comes from one owning
-thread (`-EEXIST` otherwise). Filling an SQE is not that: send-all CQE drain
-already copies a next-leg or FIFO item into a free slot from a worker
-(`get_sqe_try`). User `prepare` from a non-owner fills a free slot the same
-way. When the SQ is full that prepare raises `RuntimeError`. A next leg
-that cannot be submitted fails the send-all.
-`submit()` / deferred wait stay issuer-only (`docs/SEND_ALL.md`).
+thread (`-EEXIST`, surfaced as `OSError`). Filling an SQE is not that:
+send-all CQE drain already copies a next-leg or FIFO item into a free slot
+from a worker (`get_sqe_try`). User `prepare` from another thread fills a
+free slot the same way. The following publish enters. Without `SQPOLL`
+that enter is `OSError` and the worker stops. A full SQ with `make_room`
+on is the same error. A next leg that cannot be submitted fails the
+send-all. With `SQPOLL` the kernel thread is the issuer and any thread
+may publish. Do not set `DEFER_TASKRUN` when a worker must enter. A
+blocking `wait()`, `poll()`, or `serve_completions()` from another thread
+is `OSError` when it enters. A peek that does not enter does not raise.
+See `docs/SEND_ALL.md`.
 
-**Current caveat:** `SINGLE_ISSUER` without `SQPOLL` plus completion workers.
-A worker may fill a free slot and cannot enter. With `auto_submit` on, that
-handler wakes the host when it queued work the issuer must publish. A full
-SQ raises and stops that worker. Prefer `flags=0`, or `SQPOLL`, when workers
-must submit. `ring.fd` is not a substitute: an unsubmitted SQE does not make
-the CQ readable.
-
-**Later (low urgency):** the host wake is `break_wait_callback` when the
-worker queued a waitable SQE, a housekeeping SQE, or a conflict park.
-Uncommon pairing: `DEFER_TASKRUN` already
-rejects worker `serve_completions`, and a driving loop that flushes regularly
-is enough.
+**Current caveat:** `SINGLE_ISSUER` without `SQPOLL` plus completion
+workers. A worker may fill a free slot. The publish is `OSError`
+(`EEXIST`) and that worker stops. There is no host wake that publishes
+the SQE for it. Prefer `flags=0`, or `SQPOLL`, when workers must enter.
+`ring.fd` is not a substitute: an unsubmitted SQE does not make the CQ
+readable. `DEFER_TASKRUN` still will not mark the fd readable until the
+owner enters.
 
 We considered routing all prepares through a single issuer thread so the flag
 could be enabled without that split. That model is **not** the current plan:
@@ -622,8 +625,9 @@ could be enabled without that split. That model is **not** the current plan:
 - worker-thread and callback-thread prepare is intentional for completion
   workers, continuous-operation callbacks, and future threaded backends.
 
-Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one kernel-visible
-**submitter**. Prepare from completion workers is allowed; submit is not.
+Callers that want `IORING_SETUP_SINGLE_ISSUER` must guarantee one
+kernel-visible **submitter**. Prepare from workers into a free slot is
+still allowed. The following publish is `OSError` without `SQPOLL`.
 A dedicated issuer thread that only drains a queue is a possible future
 experiment, not the default `UringProactor` shape.
 

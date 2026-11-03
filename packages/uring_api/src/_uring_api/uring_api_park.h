@@ -5,7 +5,6 @@
 
 #include "uring_api_common.h"
 
-int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out);
 void clear_parked(UringApiRing *self);
 int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, UringApiFdSlot **slot_out);
 /* Caller holds the ring CS. 1 when a nowait op must sit on the conflict FIFO
@@ -14,6 +13,8 @@ int should_enqueue_conflict(UringApiRing *self, UringApiCompletion *completion, 
 int nowait_cancel_must_park(UringApiRing *self, UringApiCompletion *target);
 int nowait_fd_op_must_park(UringApiRing *self, int fd);
 int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion);
-int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out);
+/* Copy until the next send_all is active or the FIFO is empty. A full SQ
+ * enters. make_room is not consulted. 0 drained, -1 making room failed. */
+int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot);
 
 #endif

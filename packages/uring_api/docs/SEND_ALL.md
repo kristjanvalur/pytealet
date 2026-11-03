@@ -29,14 +29,15 @@ lazy batching.**
 `prepare()` fills a kernel SQE immediately when it can. `submit()` calls
 `io_uring_submit`. That kernel queue is the lazy batch. A full queue follows
 `make_room`, which is independent of `auto_submit` and on by default. When
-it is on, a thread that may submit flushes and then takes a slot. When it
-is off, that thread raises `SubmissionQueueFull`.
+it is on, `prepare()` flushes and then takes a slot. An enter the kernel
+rejects is `OSError`. When it is off, `prepare()` raises
+`SubmissionQueueFull` and does not enter.
 
 The submission queue cannot host send-all serialisation by itself: anything
 in it is published on the next enter, including a close sitting behind a
 send-all that still has remaining legs. The one userspace queue in front of
-it is the per-fd conflict FIFO. A thread that must not enter fills a free
-slot and raises `RuntimeError` when the queue is full.
+it is the per-fd conflict FIFO. Any thread may fill a free slot. A full SQ
+with `make_room` on enters.
 
 | Place | What | Role |
 | --- | --- | --- |
@@ -51,8 +52,8 @@ prepare()
       │
       ├─ no conflict        get_sqe_try + prep_*  → kernel SQ
       │                     if send-all: fd becomes busy
-      │                     make_room: flush SQ if full, on a thread that may enter
-      │                     a thread that must not enter, and a full SQ: raise
+      │                     make_room: flush SQ if full
+      │                     a rejected enter is OSError; make_room off: SubmissionQueueFull
       └─ conflicts          append that fd’s conflict FIFO
                             (except cancel-of-active send-all → SQ)
 
@@ -103,8 +104,8 @@ Kernel sees the send-all first leg and the recv. **Close is not published.**
 **4. Partial CQE for A** (64 KiB of 1 MiB)
 
 Same Completion A, offset advanced. Next-leg SQE into the kernel SQ when a
-slot is free, including a flush when the queue is full and this thread may
-enter. If that leg cannot be submitted, the send-all fails. C stays on
+slot is free, including a flush when the queue is full. If that enter
+fails, the send-all fails. C stays on
 conflict.
 Recv may complete independently.
 
@@ -232,28 +233,31 @@ On a partial send CQE (`res > 0`, bytes remain):
 2. Under the ring lock, if abandon is set, arm nothing. The caller completes
    `-ECANCELED`.
 3. Otherwise take a slot with `flush_if_full` on, ignoring `make_room`. A
-   free slot is filled from any thread, including one that must not enter.
-   A full queue on a thread that may enter publishes the unpublished tail
-   and then takes the slot. That counts as `submit_sq_full`. Prep the next
-   `IORING_OP_SEND` (same Completion pointer, `POLL_FIRST` on later legs).
-   The handler's publish submits the leg with the other SQEs from this
-   completion when the callback policy says to enter. Inline `wait()`
-   submits a continuation this thread filled during the burst, on that same
-   call, when this thread's waitable count moved. The harvest flush and
-   host `submit()` publish a leg this thread did not prepare, or one the
-   callback policy left queued.
-4. If the thread must not enter and no slot is free, or the submit fails
-   for any other reason, fail the send-all. `res` is `-ENOMEM` when the
-   error is `MemoryError`, otherwise `-EIO`. The Python exception is what
-   `wait()` raises, and what stops that `serve_completions` worker. A
-   link-timeout allocation failure aborts the leg the same way. It does
-   not leave the operation queued.
+   free slot is filled from any thread. A full queue publishes the
+   unpublished tail and then takes the slot. That counts as
+   `submit_sq_full`. An enter the kernel rejects fails the send-all.
+   Prep the next `IORING_OP_SEND` (same Completion pointer, `POLL_FIRST`
+   on later legs). The handler's publish submits the leg with the other
+   SQEs from this completion when the callback policy says to enter.
+   Inline `wait()` submits a continuation this thread filled during the
+   burst, on that same call, when this thread's waitable count moved.
+   The harvest flush and host `submit()` publish a leg this thread did
+   not prepare, or one the callback policy left queued.
+4. If the flush cannot take a slot, or that submit fails, fail the
+   send-all. `res` is `-ENOMEM` when the error is `MemoryError`,
+   otherwise `-EIO`. The Python exception is what `wait()` raises, and
+   what stops that `serve_completions` worker. A link-timeout allocation
+   failure aborts the leg the same way. It does not leave the operation
+   queued. A free slot that was filled, then fails on the later publish,
+   is a different case. That enter is `OSError`. The send-all is not
+   finished as `-EIO`. `wait()` raises. A `serve_completions` worker stops.
 
-The conflict FIFO is separate. Drain copies a head when the fd is free.
-A quiet full (`make_room` off, and this thread may submit) leaves that
-head queued. A full SQ on a thread that must not enter raises. A new
-prepare may take a free slot. A two-slot op that does not fit does not
-take the first slot.
+The conflict FIFO is separate. The send-all completion copies it until
+the next send-all is active or the FIFO is empty. A full queue enters.
+`make_room` is not read. A rejected enter is `OSError` and fails that
+completion. Nothing else drains the FIFO.
+A new prepare may take a free slot. A two-slot op that does not fit
+does not take the first slot.
 
 The issuer submits from `submit()` and from inline `wait()`. A service
 thread submits after its handler when the callback policy allows that enter.
@@ -291,8 +295,8 @@ reverse `Completion* → fd` map would only duplicate the sidecar fd.
   the next leg. A cancel from another thread therefore either sees that new
   leg or the completion does not create one. There is no parked next leg.
   A full queue raises `SubmissionQueueFull` from `prepare_cancel` when
-  `make_room` is off, on a thread that may submit. A thread that must not
-  submit raises `RuntimeError` when the queue is full. If that send's CQE
+  `make_room` is off. That path does not enter. With `make_room` on the
+  cancel enters, and an enter the kernel rejects is `OSError`. If that send's CQE
   arrives first and bytes remain, abandon finishes the drain with
   `-ECANCELED` and does not arm another leg. If the leg empties the buffer,
   the drain succeeds. A
@@ -324,13 +328,9 @@ Nowait cancel `-ENOENT` / `-EALREADY` stay silent.
 `prepare()` of a **non-busy** fd still fills an SQE immediately (`auto_submit`
 / SQ-full unchanged).
 
-Also drain a fd’s conflict FIFO:
-
-- on the next user `prepare()` that needs an SQE (`make_room` / SQ-full as
-  for that prepare; a quiet full leaves the head queued)
-- when that send-all terminals
-- from `submit()`, and from `wait()` / serve when `auto_submit` is on
-- when a worker **may** submit after a send-all CQE
+The send-all completion drains that fd’s conflict FIFO. It copies until
+the next send-all is active or the FIFO is empty, and a full queue
+enters. `prepare()`, `submit()`, and `wait()` do not drain it.
 
 While draining a FIFO, the same conflict test applies: a dequeued send-all
 marks the fd busy and later entries stay parked; cancel-of-active still fills
@@ -408,25 +408,24 @@ is delivered, so Python sees one completion for the drain.
 
 A next leg calls `get_sqe_try` with `flush_if_full` on. Return 1 fills the
 SQE. Return 0 should not happen on that path. A failure fails the send-all
-and propagates the Python exception. A conflict-FIFO copy still respects
-`make_room`: return 0 leaves the head queued, and a thread that must not
-enter raises. A worker submits once after the callback
+and propagates the Python exception. The FIFO copy uses the same enter.
+A failure there fails the completion and stops the worker. A worker submits once after the callback
 and that fill, under the callback policy, covering the continuation and
 the parked copy. Inline `wait()` submits a continuation this thread filled
 during the burst before it returns. With `auto_submit` off those automatic
 points stay off for a caller prepare. A next leg, and a copy off
-a per-fd queue, are still published when this thread's
-housekeeping flag is set. That publish can take an application SQE
+a per-fd queue, are still published from every thread. That publish can take an application SQE
 already on the tail with it. `wait()` then keeps
-reaping if that publish armed a leg and the burst delivered nothing. A
-thread whose housekeeping flag is off leaves a filled SQE for the issuer.
+reaping if that publish armed a leg and the burst delivered nothing. An
+enter the kernel rejects is `OSError`.
 The harvest flush and host `submit()` publish a waitable SQE this thread
 did not prepare, or one the callback policy left queued.
 
 Do not set `IORING_SETUP_SINGLE_ISSUER` without `SQPOLL` when a worker
-must submit. A worker can fill a free slot and cannot enter. A full SQ
-raises, and a next leg that cannot be submitted fails the send-all. With
-`SQPOLL` the kernel thread is the issuer and any thread may publish.
+must enter. A worker can fill a free slot. The following publish is
+`OSError` and stops that worker. A full SQ on a next leg fails the
+send-all. With `SQPOLL` the kernel thread is the issuer and any thread
+may publish. Do not set `DEFER_TASKRUN` for a worker that enters.
 
 ---
 
@@ -449,16 +448,13 @@ and is not this op.
    stops a racing success CQE from re-arming.
 2. **Queued cancel behind queued send-all** — FIFO submits the send-all, then
    send-all-cancel of the now-active drain; no unlink.
-3. **SQ full, `make_room=False`** — a next leg still flushes, then takes a
-   slot. That is the one handled submission-queue condition, and there is
-   no caller to retry the leg. Any other failure fails the send-all.
-   A conflict-FIFO copy does not enter. `submit()` drains it, submitting
-   already-prepared SQEs first if the SQ is full (SQPOLL may wait) rather
-   than raising `SubmissionQueueFull`. A next leg that got a slot is
-   published without a separate `submit()`, including from a service
-   thread whose housekeeping flag is set. A second send parked on the fd
-   FIFO is published when a later drain copies it. An application SQE
-   already queued can go out with that copy.
+3. **SQ full, `make_room=False`** — a user `prepare` raises
+   `SubmissionQueueFull` and does not enter. A send-all next leg, and
+   the FIFO copy that the send-all completion starts, still enter to
+   take a slot. That completion copies until the next send-all is
+   active or the FIFO is empty. If making room fails, the completion
+   fails and the worker stops. A filled copy is published from every
+   thread, together with the rest of the unpublished tail.
 4. **Two fds with concurrent send-alls** plus a close on one of them.
 5. **Nowait send-all error** after the Python caller has moved on —
    `skip_success` delivers the handle on failure; `skip_all` uses
@@ -468,11 +464,11 @@ and is not this op.
 7. **`prepare()` of a mixed batch** — each item is SQ or conflict in order
    (`prepare([send_all, close])` fills send-all then parks close). A full
    SQ still raises or flushes as today; it does not spill onto the
-   conflict FIFO. A thread that must not enter raises when the queue is
-   full.
-8. **Worker-thread CQE + issuer-only submit** — a free-slot next leg is
-   filled by the worker and published by the issuer. A full SQ fails the
-   send-all.
+   conflict FIFO. A full SQ with `make_room` on enters. A rejected enter
+   is `OSError`.
+8. **Worker-thread CQE** — a free-slot next leg is filled by the worker.
+   The following publish enters. Without `SQPOLL` that enter is
+   `OSError` and the worker stops. A full SQ fails the send-all.
 9. **Buffer lifetime** if the Python caller drops the Completion while
    the drain is still running. The ring holds one reference for that
    completion: on the per-fd FIFO while it is parked, or as the in-flight
@@ -521,7 +517,7 @@ in-flight ref.
 `skip_success = True` plus whatever token you want.
 
 No public “deferred queue” type. No `flush_deferred()` unless tests need a
-hook; `submit()` drains.
+hook. `submit()` publishes SQEs already in the queue.
 
 `probe()` does not need a kernel key — this is userspace. Optional `"SEND_ALL"`
 compile-time feature bit is unnecessary while the package is pre-release.
@@ -530,29 +526,35 @@ compile-time feature bit is unnecessary while the package is pre-release.
 
 ## Prepare and submit
 
-`IORING_SETUP_SINGLE_ISSUER` means one thread may `io_uring_enter`. Filling
-an SQE is not that. `IORING_SETUP_DEFER_TASKRUN` (which requires
-`SINGLE_ISSUER`) also pins completion reaping to that thread.
+`IORING_SETUP_SINGLE_ISSUER` means one task may `io_uring_enter` to
+submit. Filling an SQE is not that. `IORING_SETUP_DEFER_TASKRUN` (which
+requires `SINGLE_ISSUER`) also pins completion reaping to that thread.
+The extension does not pre-check either flag. A forbidden enter is
+`OSError` with `errno` `EEXIST`.
 
-- Any thread may `prepare` when it finds an SQ slot. `make_room` decides
-  whether a full SQ is flushed from prepare, on a thread that may enter.
-  With `make_room` off that thread raises `SubmissionQueueFull`.
-- A thread that must not enter raises `RuntimeError` when the queue is
-  full. A free slot is still filled. Do not set `SINGLE_ISSUER` without
-  `SQPOLL` when a worker needs to submit. `SQPOLL` with that flag still
-  lets any thread publish.
-- `submit()`, and the `wait()` / `serve_completions` flush, stay on a
-  thread that may enter. `submit()` from a thread that must not is an
-  error. There is nothing to queue: the submission queue already holds the
-  work.
+- Any thread may `prepare` into a free slot. `make_room` decides whether
+  a full SQ is flushed from prepare. With `make_room` off that prepare
+  raises `SubmissionQueueFull` and does not enter. With `make_room` on
+  it enters, and a rejected enter is `OSError`.
+- Do not set `SINGLE_ISSUER` without `SQPOLL` when a worker needs to
+  enter. `SQPOLL` with that flag still lets any thread publish. Do not
+  set `DEFER_TASKRUN` for a worker that enters.
+- `submit()`, and the `wait()` / `serve_completions` flush, enter from
+  the thread that called them. `submit()` from a task the kernel rejects
+  is `OSError`. There is nothing to queue: the submission queue already
+  holds the work.
 - A send-all next-leg fills from any thread that finds a slot, including a
   completion worker. It flushes when the queue is full, ignoring
-  `make_room`. It is submitted when this thread may enter. Otherwise the
-  next harvest flush or host `submit()` publishes a leg that was filled.
-  A leg that cannot be submitted fails the send-all.
+  `make_room`. Every thread then tries to publish it. A leg that cannot
+  be submitted fails the send-all. A filled leg whose later publish is
+  rejected stops that worker with `OSError`.
+- The send-all completion is the only conflict-FIFO drain. It copies
+  until the next send-all is active or the FIFO is empty, and a full
+  queue enters. `make_room` is not read. A failure fails that
+  completion and stops the worker.
 - The conflict FIFO is fd-busy serialisation. A recv on a send-all-busy fd
-  is not a conflict. A worker recv with a full SQ raises when that worker
-  must not enter.
+  is not a conflict. A worker recv with a full SQ and `make_room` on
+  enters, and a rejected enter is `OSError`.
 
 `UringProactor` does not default `SINGLE_ISSUER`. One thread enters; the
 ring critical section already serialises who writes an SQE.
@@ -561,9 +563,9 @@ ring critical section already serialises who writes an SQE.
 
 ## Still open
 
-- Default `SINGLE_ISSUER` on `SyncUringProactor` only, once a host that
-  never enters has an answer for a worker that filled a slot and cannot
-  submit.
+- Default `SINGLE_ISSUER` on `SyncUringProactor` only if that host is
+  the only task that enters. A worker enter is `OSError`. There is no
+  path that publishes a slot the worker filled and could not enter.
 - **send-all + `send_zc`.** Use `IORING_OP_SEND_ZC` for legs when probed
   (kernel 6.0+). This is not a flag on the current op: it changes the CQE
   machine.
@@ -631,10 +633,12 @@ ring critical section already serialises who writes an SQE.
 7. **v1 is copying send only** — zc is a second lifetime protocol.
 8. **Nowait send-all still counts as pending** until terminal.
 9. **tealetio calls `construct_send_all`.** `SendBuffer` still coalesces.
-10. **Do not default `SINGLE_ISSUER`.** Any thread may prepare. A worker
-    may fill a free slot and cannot enter unless `SQPOLL` is set. A full
-    queue on that thread raises `RuntimeError`. A next leg that cannot be
-    submitted fails the send-all.
+10. **Do not default `SINGLE_ISSUER`.** Any thread may prepare into a
+    free slot. A full SQ with `make_room` on enters and is `OSError` if
+    the kernel rejects it. `make_room` off is `SubmissionQueueFull` with
+    no enter. A next leg that cannot be submitted fails the send-all.
+    A worker that must enter needs `SQPOLL` with `SINGLE_ISSUER`, and
+    must not use `DEFER_TASKRUN`.
 
 ---
 

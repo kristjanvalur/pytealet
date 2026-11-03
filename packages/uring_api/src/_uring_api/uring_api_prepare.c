@@ -124,31 +124,20 @@ static int stamp_nowait_sqe(UringApiRing *self, struct io_uring_sqe *sqe, unsign
 
 /* Caller holds the ring CS and has checked the ring is open.
  * 1 posted, 0 caller must build a skip_all Completion, -1 error.
- * a full SQ on a thread that must not enter is -1, not a park.
- * a parked fd-FIFO copy is housekeeping. auto_submit off publishes
- * that tail after the new SQE is queued, so the SQE can ride along. */
+ * a full SQ enters when make_room is on. that enter is OSError when
+ * the kernel rejects it, not a park. make_room off returns 0. */
 static int nowait_post_or_defer(UringApiRing *self, int must_park, unsigned int kind, int advisory_fd,
                                 void (*prep)(struct io_uring_sqe *sqe, void *arg), void *arg) {
     struct io_uring_sqe *sqe;
-    uint64_t internal_at;
     int got;
 
     if (must_park) {
         return 0;
     }
-    internal_at = ring_thread_housekeeping_sqes();
-    /* a ready conflict-FIFO head copies first, and may enter under make_room. */
-    if (drain_parked(self, 0, NULL) < 0) {
-        (void)ring_publish_housekeeping_since(self, internal_at);
-        return -1;
-    }
     got = get_sqe_try(self, 0, NULL, &sqe);
     if (got == 1) {
         prep(sqe, arg);
         stamp_nowait_sqe(self, sqe, kind, advisory_fd);
-    }
-    if (ring_publish_housekeeping_since(self, internal_at) < 0) {
-        return -1;
     }
     return got;
 }
@@ -246,7 +235,7 @@ int try_direct_poll_remove_nowait(UringApiRing *self, UringApiCompletion *target
     if (ring_check_open(self) < 0) {
         result = -1;
     } else {
-        /* poll has no conflict fd. a full SQ on a thread that must not enter fails. */
+        /* poll has no conflict fd. a full SQ follows make_room. */
         result = nowait_post_or_defer(self, 0, (unsigned int)URING_API_PENDING_POLL_REMOVE, -1, prep_poll_remove_sqe,
                                       target);
         if (result > 0) {
@@ -319,10 +308,9 @@ int nowait_advisory_fd(UringApiCompletion *completion) {
     return -1;
 }
 
-/* 1: two slots are free, or this call made them free. 0: this thread may
- * submit but must not enter. -1: error, including a thread that must not
- * enter. a quiet full is 0. prepare_sq_short raises or stops the drain.
- * does not take a slot. */
+/* 1: two slots are free, or this call made them free. 0: make_room is
+ * off and this call must not enter. -1: error. a quiet full is 0.
+ * prepare_sq_short raises or stops the drain. does not take a slot. */
 int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submitted_out) {
     int enter = flush_if_full ? URING_API_SQ_ENTER_ALWAYS : URING_API_SQ_ENTER_POLICY;
 
@@ -330,7 +318,8 @@ int reserve_link_timeout_sqes(UringApiRing *self, int flush_if_full, int *submit
 }
 
 /* 1 quiet full (from_parked), -1 error. the SQ cannot take this prepare.
- * a thread that must not enter already failed in get_sqe_try / reserve. */
+ * get_sqe_try / reserve already entered, or returned 0 because make_room
+ * is off. */
 static int prepare_sq_short(UringApiRing *self, UringApiCompletion *completion, int from_parked,
                             UringApiFdSlot *send_all_slot) {
     (void)completion;
@@ -424,17 +413,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
         completion_set_bit((UringApiCompletion *)completion->cancel_target, URING_API_C_SEND_ALL_ABANDON);
     }
 
-    /* conflicting ops park even if leftover drain would hit a full SQ. */
+    /* a busy fd parks. the send_all completion copies the FIFO later. */
     if (!from_parked && should_enqueue_conflict(self, completion, NULL)) {
         return enqueue_conflict(self, completion);
-    }
-    /* leftover drain so a conflict copy can take this SQE. from_parked
-     * must not recurse. the caller's prepare() publishes afterwards when
-     * auto_submit is off, so this SQE can ride along with that housekeeping. */
-    if (!from_parked) {
-        if (drain_parked(self, 0, NULL) < 0) {
-            return -1;
-        }
     }
 
     if (completion->kind == URING_API_PENDING_SEND_ALL) {
@@ -673,16 +654,9 @@ int prepare_one_constructed_ex(UringApiRing *self, UringApiCompletion *completio
     }
     /* timeout SQE before any completion state. a malloc or slot miss rolls
      * the op SQE back and leaves PREPARED, the in-flight ref, and the fd
-     * slot untouched. a resume that is already queued stays queued on
-     * malloc: failing wait() or submit() would be a false failure. */
+     * slot untouched. a parked copy that cannot fill its timer fails the
+     * drain: nothing retries that FIFO. */
     if (completion->has_link_timeout && fill_link_timeout(self, completion, sqe) < 0) {
-        if (from_parked && PyErr_ExceptionMatches(PyExc_MemoryError)) {
-            PyErr_Clear();
-            if (send_all_slot) {
-                fd_table_try_free(self, send_all_slot);
-            }
-            return 2;
-        }
         if (send_all_slot) {
             fd_table_try_free(self, send_all_slot);
         }

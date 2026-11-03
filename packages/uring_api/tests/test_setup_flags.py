@@ -68,12 +68,12 @@ def test_single_issuer_rejects_cross_thread_submit():
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(8))
-            errors: list[RuntimeError] = []
+            errors: list[OSError] = []
 
             def submit_from_other_thread():
                 try:
                     ring.submit()
-                except RuntimeError as exc:
+                except OSError as exc:
                     errors.append(exc)
 
             thread = threading.Thread(target=submit_from_other_thread)
@@ -81,7 +81,7 @@ def test_single_issuer_rejects_cross_thread_submit():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(errors) == 1
-            assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
+            assert errors[0].errno == errno.EEXIST
     finally:
         reader.close()
         writer.close()
@@ -183,12 +183,13 @@ def test_defer_taskrun_rejects_cross_thread_wait():
         with uring_api.Ring(entries=4, flags=flags) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(8))
             assert ring.wait(0) == []
-            errors: list[RuntimeError] = []
+            errors: list[OSError] = []
 
             def wait_from_other_thread():
                 try:
-                    ring.wait(0)
-                except RuntimeError as exc:
+                    # a blocking wait enters. a peek would not.
+                    ring.wait(None)
+                except OSError as exc:
                     errors.append(exc)
 
             thread = threading.Thread(target=wait_from_other_thread)
@@ -196,7 +197,7 @@ def test_defer_taskrun_rejects_cross_thread_wait():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(errors) == 1
-            assert "IORING_SETUP_DEFER_TASKRUN" in str(errors[0])
+            assert errors[0].errno == errno.EEXIST
     finally:
         reader.close()
         writer.close()
@@ -208,12 +209,12 @@ def test_defer_taskrun_rejects_cross_thread_submit():
     try:
         with uring_api.Ring(entries=4, flags=flags) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(8))
-            errors: list[RuntimeError] = []
+            errors: list[OSError] = []
 
             def submit_from_other_thread():
                 try:
                     ring.submit()
-                except RuntimeError as exc:
+                except OSError as exc:
                     errors.append(exc)
 
             thread = threading.Thread(target=submit_from_other_thread)
@@ -221,7 +222,7 @@ def test_defer_taskrun_rejects_cross_thread_submit():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(errors) == 1
-            assert "IORING_SETUP_DEFER_TASKRUN" in str(errors[0])
+            assert errors[0].errno == errno.EEXIST
     finally:
         reader.close()
         writer.close()
@@ -232,7 +233,7 @@ def test_single_issuer_allows_cross_thread_wait():
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(8))
-            # non-issuer wait cannot flush; issuer must publish prepared SQEs
+            # publish first. a later wait only reaps, which SINGLE_ISSUER allows.
             assert ring.submit() >= 1
             writer.send(b"x")
             results: list[object] = []
@@ -258,26 +259,27 @@ def test_single_issuer_allows_break_wait_from_owner_thread():
         # owner may call it; from this thread it is a no-op (no NOP to submit)
         assert ring.break_wait() is None
 
-def test_single_issuer_rejects_cross_thread_break_wait():
+def test_single_issuer_break_wait_from_another_thread_does_not_enter():
+    """Nobody is inside io_uring_enter, so break_wait does not submit a NOP."""
+
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
     reader, writer = connected_tcp_pair()
     try:
         with uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER) as ring:
             ring.prepare_recv(reader.fileno(), bytearray(8))
-            errors: list[RuntimeError] = []
+            errors: list[BaseException] = []
 
             def break_from_other_thread():
                 try:
                     ring.break_wait()
-                except RuntimeError as exc:
+                except BaseException as exc:
                     errors.append(exc)
 
             thread = threading.Thread(target=break_from_other_thread)
             thread.start()
             thread.join(1.0)
             assert thread.is_alive() is False
-            assert len(errors) == 1
-            assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
+            assert errors == []
     finally:
         reader.close()
         writer.close()
@@ -290,12 +292,12 @@ def test_defer_taskrun_rejects_cross_thread_serve_completions():
         with uring_api.Ring(entries=4, flags=flags) as ring:
             ring.callback = lambda _completion: None
             ring.prepare_recv(reader.fileno(), bytearray(8))
-            errors: list[RuntimeError] = []
+            errors: list[OSError] = []
 
             def serve_from_other_thread():
                 try:
                     ring.serve_completions()
-                except RuntimeError as exc:
+                except OSError as exc:
                     errors.append(exc)
 
             thread = threading.Thread(target=serve_from_other_thread)
@@ -303,7 +305,7 @@ def test_defer_taskrun_rejects_cross_thread_serve_completions():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(errors) == 1
-            assert "IORING_SETUP_DEFER_TASKRUN" in str(errors[0])
+            assert errors[0].errno == errno.EEXIST
     finally:
         reader.close()
         writer.close()
@@ -335,8 +337,8 @@ def test_non_issuer_prepare_raises_when_sq_full():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(errors) == 1
-            assert isinstance(errors[0], RuntimeError)
-            assert "IORING_SETUP_SINGLE_ISSUER" in str(errors[0])
+            assert isinstance(errors[0], OSError)
+            assert errors[0].errno == errno.EEXIST
             assert ring.pending_count() == ring.sq_entries
     finally:
         reader.close()
@@ -372,8 +374,7 @@ def test_non_issuer_second_prepare_raises_when_sq_stays_full():
             thread.join(1.0)
             assert thread.is_alive() is False
             assert len(errors) == 2
-            assert all(isinstance(exc, RuntimeError) for exc in errors)
-            assert all("IORING_SETUP_SINGLE_ISSUER" in str(exc) for exc in errors)
+            assert all(isinstance(exc, OSError) and exc.errno == errno.EEXIST for exc in errors)
             assert ring.pending_count() == ring.sq_entries
     finally:
         reader.close()

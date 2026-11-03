@@ -163,59 +163,21 @@ int enqueue_conflict(UringApiRing *self, UringApiCompletion *completion) {
         }
         return -1;
     }
-    fd_table_mark_drain(self, slot);
-    /* a new park is work the host may have to publish. the push is the
-     * commit: a failure above did not adopt the completion. */
+    /* the push is the commit: a failure above did not adopt the completion.
+     * the send_all completion copies this FIFO. nothing else walks it. */
     ring_note_parked_op();
-    return 0;
-}
-
-int drain_parked(UringApiRing *self, int flush_if_full, int *submitted_out) {
-    int ret;
-
-    while (self->fd_drain_head) {
-        UringApiFdSlot *slot = self->fd_drain_head;
-
-        ret = drain_fd_slot(self, slot, flush_if_full, submitted_out);
-        if (ret != 0) {
-            /* leftover SQ-full re-queued the slot; do not resume the loop. */
-            return ret < 0 ? -1 : 0;
-        }
-    }
     return 0;
 }
 
 void clear_parked(UringApiRing *self) { fd_table_clear(self); }
 
-static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion, int flush_if_full,
-                                  int *submitted_out) {
-    return prepare_one_constructed_ex(self, completion, 1, flush_if_full, submitted_out);
+static int fill_queued_completion(UringApiRing *self, UringApiCompletion *completion) {
+    /* always enter on a full SQ. the completion that freed the fd is the
+     * only caller, and it cannot leave the head for a later retry. */
+    return prepare_one_constructed_ex(self, completion, 1, 1, NULL);
 }
 
-/* leftover drain (flush_if_full==0) is best-effort: quiet SQ-full (prepare
- * return 1) means stop, leave the head queued. flush_if_full must have entered,
- * so a quiet full becomes SubmissionQueueFull. return 2 is not that: the
- * parked op could not allocate its link timeout, so stop without an error
- * even when this drain was allowed to enter. */
-static int leftover_fill_result(int fill_ret, int flush_if_full) {
-    if (fill_ret == 0) {
-        return 0;
-    }
-    if (fill_ret == 2) {
-        return 1;
-    }
-    if (fill_ret < 0) {
-        return -1;
-    }
-    if (flush_if_full) {
-        PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
-        return -1;
-    }
-    return 1;
-}
-
-int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, int *submitted_out) {
-    fd_table_unlink_drain(self, slot);
+int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot) {
     while (slot->fifo.count) {
         UringApiCompletion *completion = fd_table_fifo_peek(slot);
 
@@ -223,12 +185,13 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             break;
         }
         {
-            int fill_ret = leftover_fill_result(fill_queued_completion(self, completion, flush_if_full, submitted_out),
-                                                flush_if_full);
+            int fill_ret = fill_queued_completion(self, completion);
 
             if (fill_ret != 0) {
-                fd_table_mark_drain(self, slot);
-                return fill_ret;
+                if (fill_ret > 0 && !PyErr_Occurred()) {
+                    PyErr_SetString(UringApiSubmissionQueueFullError, "no submission queue entries available");
+                }
+                return -1;
             }
             /* a copy off this FIFO is housekeeping. a next leg notes
              * itself in send_all_commit_leg and is not queued here. */
@@ -241,12 +204,6 @@ int drain_fd_slot(UringApiRing *self, UringApiFdSlot *slot, int flush_if_full, i
             Py_DECREF(completion);
         }
     }
-    if (slot->fifo.count > 0 && slot->active == NULL) {
-        fd_table_mark_drain(self, slot);
-    } else if (slot->fifo.count > 0 && is_cancel_of_active(fd_table_fifo_peek(slot), slot)) {
-        fd_table_mark_drain(self, slot);
-    } else {
-        fd_table_try_free(self, slot);
-    }
+    fd_table_try_free(self, slot);
     return 0;
 }

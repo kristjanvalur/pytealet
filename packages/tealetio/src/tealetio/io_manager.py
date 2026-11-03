@@ -1290,9 +1290,9 @@ class ProactorIOManager:
         ``thread_handler``.
 
         The handler may prepare further IO (the connection's first recv, a
-        send from the accept callback). A worker that must not submit leaves
-        those SQEs queued. With ``auto_submit`` on, the ring wakes the host.
-        This path does not call ``wake_wait``.
+        send from the accept callback). With ``auto_submit`` on, the worker
+        publishes those SQEs when it returns. This path does not call
+        ``wake_wait``.
 
         ``tcp_nodelay`` is passed to ``proactor.accept_many``. It disables
         Nagle on each accepted TCP socket. A ``setsockopt`` failure is
