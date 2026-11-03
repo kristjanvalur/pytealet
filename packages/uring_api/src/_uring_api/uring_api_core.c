@@ -942,9 +942,6 @@ int sq_prepare_room(UringApiRing *self, unsigned int need, int enter, int *submi
     if (ring_check_submit_thread(self, 1) < 0) {
         return -1;
     }
-    if (enter == URING_API_SQ_ENTER_NEVER) {
-        return 0;
-    }
     if (enter == URING_API_SQ_ENTER_POLICY) {
         if (!ring_policy_on_sq_full(self)) {
             return 0;

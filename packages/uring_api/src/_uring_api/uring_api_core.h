@@ -227,10 +227,10 @@ int sq_check_need(UringApiRing *self, unsigned int need);
  * allowed to enter. io_uring_sqring_wait runs only when the SQ is completely
  * full. A partly full queue sleeps until need slots are free. */
 int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
-/* How sq_prepare_room may enter. never: a shortfall returns 0. policy:
- * enter when this thread's on_sq_full flag is set. always: enter even if
- * make_room is off (a send-all next leg, submit, and the wait flush). */
-enum { URING_API_SQ_ENTER_NEVER = 0, URING_API_SQ_ENTER_POLICY = 1, URING_API_SQ_ENTER_ALWAYS = 2 };
+/* How sq_prepare_room may enter. policy: enter when this thread's
+ * on_sq_full flag is set. always: enter even if make_room is off
+ * (a send-all next leg, submit, and the wait flush). */
+enum { URING_API_SQ_ENTER_POLICY = 1, URING_API_SQ_ENTER_ALWAYS = 2 };
 /* Room for need free SQ slots. Does not take one, so a two-slot op cannot
  * be left holding the first. 1: the slots are free. 0: this thread may
  * submit and this call must not enter (no exception). -1: error, including

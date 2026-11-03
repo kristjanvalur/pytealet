@@ -492,8 +492,8 @@ which is ``sq_prepare_room(need=2)``. The helper does not take a slot.
 1 means `need` slots are free, with no thread check. 0 means they are not,
 this thread may submit, and this call did not enter. -1 is a ring that cannot
 hold `need`, a stuck queue, a flush ``OSError``, or a full SQ on a thread that
-must not enter. Enter is never, policy (``on_sq_full`` and this thread may
-submit), or always (this thread may submit even when ``make_room`` is off:
+must not enter. Enter is policy (``on_sq_full`` and this thread may
+submit) or always (this thread may submit even when ``make_room`` is off:
 ``submit()``, ``wait()``, and a send-all next leg). ``flush_if_full`` maps to
 always; otherwise policy. A from-parked quiet full is 0. ``prepare_sq_short``
 turns that into the drain's parked stop, or ``SubmissionQueueFull`` when the
