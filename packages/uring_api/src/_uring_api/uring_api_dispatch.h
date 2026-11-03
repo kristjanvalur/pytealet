@@ -14,7 +14,8 @@ enum {
 /*
  * Opens wait_idle immediately. Submits a wake NOP unless completion service is
  * active (workers already reap the CQ). force_nop=1 always submits (stop_serving).
- * Returns 0 or -1 with exception set.
+ * A call that opened the park then runs break_wait_callback. The owner skip
+ * does not. Returns 0 or -1 with exception set.
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop);
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *ignored);

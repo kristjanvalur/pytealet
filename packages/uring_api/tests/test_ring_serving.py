@@ -1446,3 +1446,405 @@ def test_ring_rejects_callback_change_while_completion_service_runs_when_availab
             thread.join(1.0)
             assert not thread.is_alive()
 
+
+def _wait_driver(ring: uring_api.Ring, timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not ring.driver_waiting and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert ring.driver_waiting is True
+
+
+def _unpublished(ring: uring_api.Ring) -> int:
+    stats = ring.stats()
+    submitted = stats["submit_main_sqes"] + stats["submit_worker_sqes"] + stats["submit_sq_full_sqes"]
+    return stats["sqe"] - submitted
+
+
+def test_break_wait_callback_runs_from_another_thread_when_available():
+    require_uring()
+
+    calls: list[int] = []
+
+    with uring_api.Ring() as ring:
+        ring.break_wait_callback = lambda: calls.append(1)
+        break_wait_from_other_thread(ring)
+        assert calls == [1]
+        assert ring.wait_idle(0) is True
+
+
+def test_owner_break_wait_skips_callback_by_default_when_available():
+    require_uring()
+
+    calls: list[int] = []
+
+    with uring_api.Ring() as ring:
+        ring.break_wait_callback = lambda: calls.append(1)
+        ring.break_wait()
+        assert calls == []
+        assert ring.wait_idle(0) is False
+
+
+def test_owner_break_wait_runs_callback_when_skip_disabled():
+    require_uring()
+
+    calls: list[int] = []
+
+    with uring_api.Ring(skip_owner_break_wait=False) as ring:
+        ring.break_wait_callback = lambda: calls.append(1)
+        ring.break_wait()
+        assert calls == [1]
+        assert ring.wait_idle(0) is True
+
+
+def test_break_wait_callback_reentry_does_not_recurse_when_available():
+    require_uring()
+
+    calls: list[int] = []
+
+    with uring_api.Ring() as ring:
+
+        def callback() -> None:
+            calls.append(1)
+            ring.break_wait()
+
+        ring.break_wait_callback = callback
+        break_wait_from_other_thread(ring)
+        assert calls == [1]
+        assert ring.wait_idle(0) is True
+
+
+def test_break_wait_callback_error_still_opens_the_park_when_available():
+    require_uring()
+
+    errors: list[str] = []
+
+    def callback() -> None:
+        raise RuntimeError("boom")
+
+    def run(ring: uring_api.Ring) -> None:
+        try:
+            ring.break_wait()
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    with uring_api.Ring() as ring:
+        ring.break_wait_callback = callback
+        thread = threading.Thread(target=run, args=(ring,))
+        thread.start()
+        thread.join(1.0)
+        assert thread.is_alive() is False
+        assert errors == ["boom"]
+        assert ring.wait_idle(0) is True
+
+
+def test_break_wait_callback_property_validation_when_available():
+    require_uring()
+
+    def callback() -> None:
+        return None
+
+    with uring_api.Ring() as ring:
+        assert ring.break_wait_callback is None
+        ring.break_wait_callback = callback
+        assert ring.break_wait_callback is callback
+        ring.break_wait_callback = None
+        assert ring.break_wait_callback is None
+        with pytest.raises(TypeError, match="break_wait_callback must be callable or None"):
+            ring.break_wait_callback = object()  # type: ignore[assignment]
+        with pytest.raises(TypeError, match="cannot delete break_wait_callback"):
+            del ring.break_wait_callback
+
+
+def test_stop_serving_runs_break_wait_callback_when_available():
+    require_uring()
+
+    calls: list[int] = []
+
+    with uring_api.Ring() as ring:
+        ring.callback = lambda _completion: None
+        ring.break_wait_callback = lambda: calls.append(1)
+        thread = threading.Thread(target=ring.serve_completions)
+        thread.start()
+        wait_until_running(ring)
+        ring.stop_serving()
+        thread.join(1.0)
+        assert thread.is_alive() is False
+        assert calls == [1]
+
+
+def test_single_issuer_worker_wakes_a_parked_host_when_available():
+    """A worker that cannot submit leaves the next SQE queued and opens wait_idle."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    left, right = socket.socketpair()
+    ring: uring_api.Ring | None = None
+    worker: threading.Thread | None = None
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        prepared = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            assert ring is not None
+            ring.prepare_recv(left.fileno(), bytearray(4), 0, 2)
+            prepared.set()
+
+        ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER)
+        ring.callback = callback
+        worker = threading.Thread(target=ring.serve_completions)
+        worker.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() >= 1
+
+        results: list[bool] = []
+        parked = threading.Thread(target=lambda: results.append(ring.wait_idle(2.0)))
+        parked.start()
+        _wait_driver(ring)
+        assert right.send(b"ping") == 4
+        parked.join(2.0)
+        assert parked.is_alive() is False
+        assert results == [True]
+        assert prepared.is_set()
+        assert ring.stats()["submit_worker_sqes"] == 0
+        assert _unpublished(ring) >= 1
+        assert ring.submit() >= 1
+        assert _unpublished(ring) == 0
+    finally:
+        if ring is not None and worker is not None:
+            ring.stop_serving()
+            worker.join(2.0)
+        if ring is not None:
+            ring.close()
+        left.close()
+        right.close()
+
+
+def test_single_issuer_full_queue_park_wakes_a_parked_host_when_available():
+    """A park that does not move the publish count still wakes a host inside wait_idle.
+
+    Nowait closes fill the queue and do not count. The following recv has no
+    slot, so it parks. The wake is that park.
+    """
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    left, right = socket.socketpair()
+    spare_fds: list[int] = []
+    ring: uring_api.Ring | None = None
+    worker: threading.Thread | None = None
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        prepared = threading.Event()
+        notes: dict[str, bool] = {}
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            assert ring is not None
+            for _ in range(ring.sq_entries):
+                spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                spare_fds.append(spare.detach())
+                ring.prepare_close_nowait(spare_fds[-1])
+            before = ring.stats()["sqe"]
+            ring.prepare_recv(left.fileno(), bytearray(4), 0, 2)
+            notes["recv_filled"] = ring.stats()["sqe"] != before
+            prepared.set()
+
+        ring = uring_api.Ring(entries=4, flags=uring_api.IORING_SETUP_SINGLE_ISSUER)
+        ring.callback = callback
+        worker = threading.Thread(target=ring.serve_completions)
+        worker.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() >= 1
+
+        results: list[bool] = []
+        parked = threading.Thread(target=lambda: results.append(ring.wait_idle(2.0)))
+        parked.start()
+        _wait_driver(ring)
+        assert right.send(b"ping") == 4
+        parked.join(2.0)
+        assert parked.is_alive() is False
+        assert results == [True]
+        assert prepared.is_set()
+        assert notes["recv_filled"] is False
+        assert ring.stats()["submit_worker_sqes"] == 0
+        assert ring.submit() >= 1
+    finally:
+        if ring is not None and worker is not None:
+            ring.stop_serving()
+            worker.join(2.0)
+        if ring is not None:
+            ring.close()
+        left.close()
+        right.close()
+        for fd in spare_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
+    """A registered callback runs even though the host is not inside wait_idle."""
+
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    left, right = socket.socketpair()
+    ring: uring_api.Ring | None = None
+    worker: threading.Thread | None = None
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        prepared = threading.Event()
+        wakes: list[int] = []
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            assert ring is not None
+            ring.prepare_recv(left.fileno(), bytearray(4), 0, 2)
+            prepared.set()
+
+        def wake() -> None:
+            wakes.append(1)
+
+        ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER)
+        ring.callback = callback
+        ring.break_wait_callback = wake
+        worker = threading.Thread(target=ring.serve_completions)
+        worker.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() >= 1
+        assert right.send(b"ping") == 4
+        assert prepared.wait(1.0)
+        deadline = time.monotonic() + 1.0
+        while not wakes and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert wakes == [1]
+        assert ring.wait_idle(0) is False
+        assert _unpublished(ring) >= 1
+    finally:
+        if ring is not None and worker is not None:
+            ring.stop_serving()
+            worker.join(2.0)
+        if ring is not None:
+            ring.close()
+        left.close()
+        right.close()
+
+
+def test_single_issuer_auto_submit_off_does_not_wake_a_parked_host():
+    require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
+
+    left, right = socket.socketpair()
+    ring: uring_api.Ring | None = None
+    worker: threading.Thread | None = None
+    parked: threading.Thread | None = None
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        prepared = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data != 1:
+                return
+            assert ring is not None
+            ring.prepare_recv(left.fileno(), bytearray(4), 0, 2)
+            prepared.set()
+
+        ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER, auto_submit=False)
+        ring.callback = callback
+        worker = threading.Thread(target=ring.serve_completions)
+        worker.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() >= 1
+
+        results: list[bool] = []
+        parked = threading.Thread(target=lambda: results.append(ring.wait_idle(2.0)))
+        parked.start()
+        _wait_driver(ring)
+        assert right.send(b"ping") == 4
+        assert prepared.wait(1.0)
+        time.sleep(0.05)
+        assert parked.is_alive() is True
+        assert _unpublished(ring) >= 1
+        break_wait_from_other_thread(ring)
+        parked.join(1.0)
+        assert parked.is_alive() is False
+        assert results == [True]
+    finally:
+        if ring is not None and parked is not None and parked.is_alive():
+            break_wait_from_other_thread(ring)
+            parked.join(1.0)
+        if ring is not None and worker is not None:
+            ring.stop_serving()
+            worker.join(2.0)
+        if ring is not None:
+            ring.close()
+        left.close()
+        right.close()
+
+
+def test_plain_ring_worker_does_not_wake_a_parked_host_when_available():
+    """A worker that may submit publishes the SQE itself and leaves wait_idle alone."""
+
+    require_uring()
+
+    left, right = socket.socketpair()
+    ring: uring_api.Ring | None = None
+    worker: threading.Thread | None = None
+    parked: threading.Thread | None = None
+    try:
+        left.setblocking(False)
+        right.setblocking(False)
+        second = threading.Event()
+
+        def callback(completion: uring_api.Completion) -> None:
+            if completion.user_data == 1:
+                assert ring is not None
+                ring.prepare_send(right.fileno(), b"pong", 0, 2)
+                return
+            if completion.user_data == 2:
+                second.set()
+
+        ring = uring_api.Ring(flags=0)
+        ring.callback = callback
+        worker = threading.Thread(target=ring.serve_completions)
+        worker.start()
+        wait_until_running(ring)
+        ring.prepare_recv(left.fileno(), bytearray(4), 0, 1)
+        assert ring.submit() >= 1
+
+        results: list[bool] = []
+        parked = threading.Thread(target=lambda: results.append(ring.wait_idle(2.0)))
+        parked.start()
+        _wait_driver(ring)
+        assert right.send(b"ping") == 4
+        assert second.wait(1.0)
+        time.sleep(0.05)
+        assert parked.is_alive() is True
+        assert ring.stats()["submit_worker_sqes"] >= 1
+        break_wait_from_other_thread(ring)
+        parked.join(1.0)
+        assert parked.is_alive() is False
+        assert results == [True]
+    finally:
+        if ring is not None and parked is not None and parked.is_alive():
+            break_wait_from_other_thread(ring)
+            parked.join(1.0)
+        if ring is not None and worker is not None:
+            ring.stop_serving()
+            worker.join(2.0)
+        if ring is not None:
+            ring.close()
+        left.close()
+        right.close()
+

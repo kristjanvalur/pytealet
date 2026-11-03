@@ -127,6 +127,11 @@ void ring_note_publish_sqe(UringApiRing *self, int waitable);
 void ring_note_housekeeping_sqe(void);
 uint64_t ring_thread_housekeeping_sqes(void);
 uint64_t ring_thread_publish_sqes(void);
+/* One new fill-wait or conflict park this thread adopted. A second enqueue
+ * of an op already on fill-wait does not count. Monotonic for the life of
+ * the thread. Shared by every ring the thread touches. */
+void ring_note_parked_op(void);
+uint64_t ring_thread_parked_ops(void);
 UringApiCompletion *cqe_get_completion(UringApiRing *self, struct io_uring_cqe *cqe);
 unsigned int ring_sq_entries(UringApiRing *self);
 unsigned int ring_cq_entries(UringApiRing *self);
@@ -233,11 +238,7 @@ int sq_ensure_space(UringApiRing *self, unsigned int need, int *submitted_out);
  * enter when this thread's on_sq_full flag is set and this thread may
  * submit (make_room). always: enter when this thread may submit even if
  * make_room is off (submit and the wait flush). */
-enum {
-    URING_API_SQ_ENTER_NEVER = 0,
-    URING_API_SQ_ENTER_POLICY = 1,
-    URING_API_SQ_ENTER_ALWAYS = 2
-};
+enum { URING_API_SQ_ENTER_NEVER = 0, URING_API_SQ_ENTER_POLICY = 1, URING_API_SQ_ENTER_ALWAYS = 2 };
 /* Room for need free SQ slots. Does not take one, so a two-slot op cannot
  * be left holding the first. 1: the slots are free. 0: they are not, and
  * this call did not enter (no exception). -1: the ring cannot hold need,

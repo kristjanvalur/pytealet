@@ -278,7 +278,12 @@ pointer), not a second stored `user_data`.
   be inside that span. `driver_blocks` stays set. Before it is set the
   sleep flag is ignored, so a host that only polls still gets the enter
   for a waitable SQE. A non-waitable-only batch does not enter even then.
-  That is the non-SQPOLL rule. SQPOLL publishes any SQE the handler kept,
+  That is the non-SQPOLL rule. A worker that must not submit, with
+  `auto_submit` on, wakes the host after that handler when the publish
+  count, the housekeeping count, or a new fill-wait or conflict park
+  moved. The idle park is signalled only when the host is already inside
+  it. `break_wait_callback` runs either way when set. Do not add a
+  tealetio special case for that wake. SQPOLL publishes any SQE the handler kept,
   including that batch, when the handler returns.
   One per-thread count, snapshotted at handler entry
   (`ring_thread_publish_sqes` / `ring_should_we_submit`), is the SQEs this
@@ -521,6 +526,9 @@ get_sqe/re-validate protocol across prepare).
   `Ring(skip_owner_break_wait=False)` keeps the sticky wake for a waiter on
   another thread (inline `wait_async`). The latch must stick before that
   thread parks. There is no setter and no `URING_API_SKIP_OWNER_BREAK_WAIT`.
+  A call that opened the park then runs `break_wait_callback` when set.
+  The owner skip does not. A nested call from the callable still opens
+  the park and does not run the callable again.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler
@@ -567,10 +575,15 @@ get_sqe/re-validate protocol across prepare).
   `prepare()` stays lazy.
   TAKE does not submit when the cared count did not move. On a plain ring
   it also stays queued when no waiter is held.
-  ``SINGLE_ISSUER`` plus
-  workers: the issuer must keep calling ``submit()`` (tealetio already
-  flushes before ``wait_idle``); unbounded idle park can stall send-all
-  continuations. Inline ``wait()`` flushes after its drain when the publish
+  ``SINGLE_ISSUER`` without ``SQPOLL``: a worker may fill a free SQE and
+  cannot submit. With ``auto_submit`` on, that handler wakes the host
+  when it queued a publish SQE, a housekeeping SQE, or a new fill-wait
+  or conflict park. No ``break_wait_callback`` signals ``wait_idle`` only
+  when the host is already inside it. A callback always runs, and the
+  park is signalled too when the host is inside it. The issuer still
+  flushes before it parks. An unbounded idle park can stall a send-all
+  continuation the wake did not cover: a direct nowait that is not
+  parked. Inline ``wait()`` flushes after its drain when the publish
   count moved.
 - `IORING_SETUP_DEFER_TASKRUN` pins submit and completion reaping to one thread.
   `wait()`, `poll()`, `serve_completions()`, and `break_wait()` must run on that

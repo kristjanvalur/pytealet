@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Ring.break_wait_callback`` is an optional callable with no arguments.
+  ``break_wait()`` runs it after opening the idle park, including
+  ``stop_serving()``. A call that ``skip_owner_break_wait`` drops does
+  not run it. A completion worker that must not submit, with
+  ``auto_submit`` on, uses the same callable when its handler queued a
+  waitable SQE, a housekeeping SQE, or a new fill-wait or conflict park.
+  With no callback, that path signals ``wait_idle`` only when the host
+  is already inside it. It does not latch a later park. A direct nowait
+  that is not parked still waits for ``submit()``.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
