@@ -23,9 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``callback(result, exception)`` on the scheduler through
   ``call_on_scheduler``. The callback runs inline on a live turn, and is
   queued with a driver wake otherwise. ``SendBuffer`` submits counted
-  sends, shutdown, and close through these callbacks. ``sock_close_wait``
+  sends and shutdown through these callbacks. ``sock_close_wait``
   is the parking close. ``sock_sendall``, ``sock_shutdown``, and
   ``sock_close`` stay for callers that park or close without waiting.
+- ``sock_send_close_cb`` submits a nowait ``send_all`` and then a close.
+  ``callback(None, exception)`` runs on the scheduler when the close
+  completes. Empty data is the close alone. ``SendBuffer.close`` uses it
+  for the unsent tail, and that tail is not part of the in-flight count.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.
@@ -37,15 +41,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- ``SendBuffer.write`` only appends. ``drain``, ``write_eof``, and the
-  ``close`` tail each submit one counted ``sock_sendall_cb``. The in-flight
-  count is the sum of those lengths. ``drain`` parks only while that count
-  is above the high water mark. A failed ``send_all`` reports the submitted
-  length, and the buffer subtracts it. ``write_eof`` submits
-  ``sock_shutdown_cb``. ``close`` submits ``sock_close_cb`` and does not
-  park. ``wait_closed`` waits for that close completion. The buffer wakes
-  with ``PulseEvent``. ``flush`` is removed from ``SendBuffer``, stream
-  writers, and ``SSLStream``.
+- ``SendBuffer.write`` only appends. ``drain`` and ``write_eof`` each
+  submit one counted ``sock_sendall_cb``. The in-flight count is the sum
+  of those lengths. ``drain`` parks only while that count is above the
+  high water mark. A failed ``send_all`` reports the submitted length,
+  and the buffer subtracts it. ``write_eof`` submits ``sock_shutdown_cb``.
+  ``close`` submits the unsent tail with ``sock_send_close_cb`` and does
+  not park. ``wait_closed`` waits until that close callback has run and
+  no counted send is still in flight. The buffer wakes with ``PulseEvent``.
+  ``flush`` is removed from ``SendBuffer``, stream writers, and
+  ``SSLStream``.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.

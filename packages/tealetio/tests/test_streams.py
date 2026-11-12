@@ -751,9 +751,7 @@ class TestStreamsPoC:
         finally:
             _client.close()
 
-    def test_start_server_opens_streams_from_the_accepted_socket(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_start_server_opens_streams_from_the_accepted_socket(self, scheduler: SyncProactorScheduler) -> None:
         received: list[bytes] = []
         done = Event()
 
@@ -872,13 +870,13 @@ class TestStreamsPoC:
             conn.setblocking(False)
             peer.setblocking(False)
             sent: list[bytes] = []
-            real = scheduler.io.sock_sendall_cb
+            real = scheduler.io.sock_send_close_cb
 
-            def track_sendall(sock: socket.socket, data, callback) -> None:
+            def track_send_close(sock: socket.socket, data, callback) -> None:
                 sent.append(bytes(data))
                 real(sock, data, callback)
 
-            scheduler.io.sock_sendall_cb = track_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = track_send_close  # type: ignore[method-assign]
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
@@ -893,7 +891,7 @@ class TestStreamsPoC:
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
-            scheduler.io.sock_sendall_cb = real  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = real  # type: ignore[method-assign]
             conn.close()
             peer.close()
 
@@ -914,20 +912,20 @@ class TestStreamsPoC:
                 io=scheduler.io,
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
-            close_calls: list[socket.socket] = []
+            close_calls: list[tuple[socket.socket, bytes]] = []
             real_shutdown = scheduler.io.sock_shutdown_cb
-            real_close = scheduler.io.sock_close_cb
+            real_close = scheduler.io.sock_send_close_cb
 
             def track_shutdown(sock: socket.socket, how: int, callback) -> None:
                 shutdown_calls.append((sock, how))
                 real_shutdown(sock, how, callback)
 
-            def track_close(sock: socket.socket, callback) -> None:
-                close_calls.append(sock)
-                real_close(sock, callback)
+            def track_close(sock: socket.socket, data, callback) -> None:
+                close_calls.append((sock, bytes(data)))
+                real_close(sock, data, callback)
 
             scheduler.io.sock_shutdown_cb = track_shutdown  # type: ignore[method-assign]
-            scheduler.io.sock_close_cb = track_close  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = track_close  # type: ignore[method-assign]
 
             def exercise() -> None:
                 stream_writer.close()
@@ -935,7 +933,7 @@ class TestStreamsPoC:
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
             assert shutdown_calls == []
-            assert close_calls == [stream_writer._sock]
+            assert close_calls == [(stream_writer._sock, b"")]
         finally:
             conn.close()
             peer.close()
@@ -2192,6 +2190,7 @@ class TestStreamsPoC:
         finally:
             if sock is not None:
                 sock.close()
+
 
 class TestStreamsFakeUring:
     def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):

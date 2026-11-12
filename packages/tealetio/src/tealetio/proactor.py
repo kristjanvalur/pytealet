@@ -940,6 +940,20 @@ class Proactor(Protocol):
         """Drain ``data`` then nowait-close ``sock``. No waitable."""
         ...
 
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> OpHandle:
+        """Nowait ``send_all`` of ``data``, then close. ``callback(None, exception)`` is the close.
+
+        The send has no callback. Empty ``data`` is only the close.
+        """
+        ...
+
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle: ...
 
     def accept(self, sock: socket.socket, callback: _OneshotCallback, *, tcp_nodelay: bool = False) -> OpHandle: ...
@@ -1903,6 +1917,26 @@ class SelectorProactor(ProactorBase):
 
         self.send_nowait(sock, data, on_error, expect=expect)
         self.close_socket_nowait(sock)
+
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> OpHandle:
+        """Nowait ``send_all``, then close. ``callback(None, exception)`` is the close.
+
+        The send completion stays internal. The close is queued on the write
+        FIFO behind that send. Empty ``data`` is only ``close_socket``.
+        """
+
+        self._check_open()
+        if not data:
+            return self.close_socket(sock, callback)
+        self.send_nowait(sock, data, expect=expect)
+        return self.close_socket(sock, callback)
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
@@ -3364,6 +3398,36 @@ class UringProactor(ProactorBase):
         completion.skip_all = True
         close = self._ring.construct_close_nowait(fd)
         self._ring.prepare([completion, close])
+
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> OpHandle:
+        """Nowait ``send_all``, then close. ``callback(None, exception)`` is the close.
+
+        The send is ``skip_all``. The close completion is the only callback
+        and parks on the send-all conflict FIFO. Empty ``data`` is
+        ``close_socket``. The fd is detached before either SQE is prepared.
+        """
+
+        if not data:
+            return self.close_socket(sock, callback)
+        flags = self._send_sqe_flags(expect=expect)
+        fd = sock.detach()
+        if fd == -1:
+            callback(None, None)
+            return None
+        # detach first so Python cannot close an in-flight fd. construct/prepare
+        # failures after this are usage or internal errors; we do not recover the fd.
+        completion = self._ring.construct_send_all(fd, data, flags)
+        completion.skip_all = True
+        close = self._ring.construct_close(fd, (_void_result_cqe, callback, ()))
+        self._ring.prepare([completion, close])
+        return close
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""

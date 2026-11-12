@@ -194,8 +194,9 @@ class SocketIO(Protocol):
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
     ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
-    ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` deliver
-    ``callback(result, exception)`` on the scheduler and return ``None``.
+    ``sock_sendall_cb``, ``sock_shutdown_cb``, ``sock_close_cb``, and
+    ``sock_send_close_cb`` deliver ``callback(result, exception)`` on the
+    scheduler and return ``None``. ``sock_send_close_cb`` fires on the close.
     ``sock_close_wait`` is the parking close.
     ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
     nowait (``None``). Compose helpers (``sock_accept`` with preread,
@@ -238,6 +239,13 @@ class SocketIO(Protocol):
         data: SocketSendBuffer,
         *,
         expect: IoExpect = IoExpect.READY,
+    ) -> None: ...
+
+    def sock_send_close_cb(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        callback: _IoCallback,
     ) -> None: ...
 
     def sock_send_iter(
@@ -875,6 +883,27 @@ class ProactorIOManager:
         """Pass-through to ``proactor.send_close_nowait`` (sendall then close, no waitable)."""
 
         self.proactor.send_close_nowait(sock, data, expect=expect)
+
+    def sock_send_close_cb(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _IoCallback,
+    ) -> None:
+        """Nowait ``send_all`` of ``data``, then close. The callback is the close.
+
+        ``callback(None, exception)`` runs on the scheduler when the close
+        completes, including when ``data`` is empty (close only). The send
+        has no callback and is not a counted leg. The socket FIFO runs the
+        close after that send and after any earlier send or shutdown.
+        """
+
+        self.proactor.send_close(
+            sock,
+            data,
+            self._callback_on_scheduler(callback),
+            expect=IoExpect.READY,
+        )
 
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)

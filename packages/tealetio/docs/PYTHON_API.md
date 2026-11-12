@@ -428,8 +428,8 @@ The result is how many bytes that call accepted. A short count is success.
 `callback(result, exception)` on the scheduler through `call_on_scheduler`:
 inline on a live turn, otherwise queued and the driver woken. The pair is
 the one `send_all` reports: the submitted length, including when the send
-fails. `SendBuffer` uses this for `drain`, `write_eof`, and the `close`
-tail.
+fails. `SendBuffer` uses this for `drain` and `write_eof`. The `close`
+tail is `sock_send_close_cb`, not a counted send.
 
 `scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
 an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
@@ -511,9 +511,19 @@ Uring prepares nowait `send_all` then nowait close on the same-fd conflict
 FIFO; selector closes after send completion. Do not send again on that
 socket. Later failures go to the delivery exception handler.
 `scheduler.io.sock_send_close` is a pass-through, matching `sock_close`
-vs `close_socket_nowait`. `StreamWriter.wait_closed()` does not use it.
-The writer parks on `SendBuffer.wait_closed()`, which waits for
-`sock_close_cb`.
+vs `close_socket_nowait`.
+`Proactor.send_close(sock, data, callback, *, expect=IoExpect.READY)` is
+the same drain-then-close order with a close callback. The send is
+nowait and has no callback. `callback(None, exception)` runs when the
+close completes. Empty `data` is only the close. Uring detaches the fd,
+then prepares `skip_all` `send_all` and the close together so the close
+parks on the conflict FIFO. Selector queues the close on the write FIFO
+behind the send.
+`scheduler.io.sock_send_close_cb(sock, data, callback)` delivers that
+close callback on the scheduler. `SendBuffer.close` uses it for the
+unsent tail and does not add that tail to the in-flight count.
+`wait_closed()` parks until the close callback has run and no counted
+`drain` or `write_eof` send is still in flight.
 
 `Proactor.recv` invokes `callback(RecvResult, exception)`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
@@ -1279,11 +1289,13 @@ Under the hood, `StreamWriter` queues outbound data through an internal
 `SendBuffer`. `write()` only appends. `drain()` submits one counted
 `sock_sendall_cb` for the backlog and parks only while the in-flight count
 is above the high water mark. `write_eof()` sends that backlog and submits
-`sock_shutdown_cb` (`SHUT_WR`) behind it. `close()` sends any tail, submits
-`sock_close_cb`, and does not park. `wait_closed()` parks until that close
-has completed. A failed send stores the error and subtracts the length
-`send_all` reported, so a waiter does not stay parked. The buffer does not
-close the socket itself.
+`sock_shutdown_cb` (`SHUT_WR`) behind it. `close()` submits any unsent tail
+with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
+does not park. That tail is not part of the in-flight count.
+`wait_closed()` parks until the close callback has run and no counted send
+is still in flight. A failed counted send stores the error and subtracts
+the length `send_all` reported, so a waiter does not stay parked. The
+buffer does not close the socket on that send error. `close()` does.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to

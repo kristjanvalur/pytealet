@@ -356,11 +356,12 @@ class SendBuffer:
     mark, and resumes at or below the low water mark. ``min_write`` is stored
     for callers and does not start a send.
 
-    ``close()`` does not park. Bytes not yet submitted are one more counted
-    ``sock_sendall_cb``. ``sock_close_cb`` is submitted behind that send, and
-    behind ``SHUT_WR`` when ``write_eof()`` has run. ``wait_closed()`` parks
-    until that close has completed. The socket FIFO runs the shutdown first,
-    so it has finished by then. It is then safe to leave the scheduler.
+    ``close()`` does not park. Bytes not yet submitted are a nowait
+    ``send_all`` inside ``sock_send_close_cb``, and that length is not added
+    to the in-flight count. The callback is the close completion, queued
+    behind that send and behind ``SHUT_WR`` when ``write_eof()`` has run.
+    ``wait_closed()`` parks until the close callback has run and no counted
+    send is still in flight. It is then safe to leave the scheduler.
 
     A failed send subtracts the same length and stores the error, so a waiter
     does not stay parked. The ring marks a close parked behind that send
@@ -476,21 +477,17 @@ class SendBuffer:
         self._submit_shutdown()
 
     def close(self) -> None:
-        """Reject further writes, send any tail, and submit a waitable close.
+        """Reject further writes and submit the tail with the close.
 
-        Does not park. ``wait_closed()`` waits for the close completion. A
-        ``SHUT_WR`` submitted earlier is ahead of that close on the socket.
+        Does not park. The tail is a nowait ``send_all`` and is not counted.
+        ``wait_closed()`` waits for the close callback. A ``SHUT_WR``
+        submitted earlier is ahead of that close on the socket.
         """
 
         if self._closed:
             return
         self._closed = True
-        chunk = self._detach_for_send()
-        try:
-            if chunk is not None:
-                self._submit_counted(chunk)
-        finally:
-            self._submit_close()
+        self._submit_send_close(self._take_pending())
 
     def wait_closed(self) -> None:
         """Park until ``connection_lost``. Calls ``close()`` first."""
@@ -614,15 +611,22 @@ class SendBuffer:
             self._send_error = exc
         self._pulse.set()
 
-    def _submit_close(self) -> None:
-        """Submit ``close`` behind any send or shutdown on this socket."""
+    def _submit_send_close(self, chunk: _PendingSend | None) -> None:
+        """Nowait-send ``chunk`` if any, and submit the close behind it.
+
+        ``chunk`` is not added to the in-flight count. The callback is the
+        close completion. A submit failure puts ``chunk`` back on the backlog.
+        """
 
         if self._close_submitted:
             return
         self._close_submitted = True
+        data: _PendingSend = b"" if chunk is None else chunk
         try:
-            self._io.sock_close_cb(self._sock, self._finish_close)
+            self._io.sock_send_close_cb(self._sock, data, self._finish_close)
         except BaseException as exc:
+            if chunk is not None:
+                self._prepend_pending(chunk)
             self._finish_close_result(exc)
             raise
 

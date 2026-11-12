@@ -118,10 +118,10 @@ class WriterCore:
     def wait_closed(self) -> None:
         """Park until the close has completed.
 
-        Counted sends and a ``write_eof()`` ``SHUT_WR`` are ahead of that
-        close on the socket, so they have finished too. The scheduler can
-        then exit without dropping them. ``SHUT_WR`` is still only
-        ``write_eof()``.
+        Counted sends, the close tail, and a ``write_eof()`` ``SHUT_WR`` are
+        ahead of that close on the socket, so they have finished too. The
+        scheduler can then exit without dropping them. ``SHUT_WR`` is still
+        only ``write_eof()``.
         """
 
         if self._closed:

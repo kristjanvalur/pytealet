@@ -225,9 +225,7 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
-    def test_mutable_first_write_is_snapshotted_from_caller_buffer(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_mutable_first_write_is_snapshotted_from_caller_buffer(self, scheduler: SyncProactorScheduler) -> None:
         """bytearray/memoryview writes must not alias the caller's buffer."""
 
         reader, writer = socket.socketpair()
@@ -694,14 +692,14 @@ class TestSendBuffer:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
             writer.close()
 
-    def test_close_sends_the_tail_and_waits_for_the_counted_send(self, scheduler: SyncProactorScheduler) -> None:
+    def test_close_tail_is_outside_the_in_flight_count(self, scheduler: SyncProactorScheduler) -> None:
         _reader, writer = socket.socketpair()
         try:
             writer.setblocking(False)
             pending_ops: list[tuple[bytes, _HeldCallback]] = []
-            close_ops: list[_HeldCallback] = []
+            close_ops: list[tuple[bytes, _HeldCallback]] = []
             real_sendall = scheduler.io.sock_sendall_cb
-            real_close = scheduler.io.sock_close_cb
+            real_close = scheduler.io.sock_send_close_cb
 
             def staged_sendall(sock: socket.socket, data, callback) -> None:
                 del sock
@@ -710,35 +708,37 @@ class TestSendBuffer:
                 held.arm(callback)
                 pending_ops.append((payload, held))
 
-            def staged_close(sock: socket.socket, callback) -> None:
+            def staged_close(sock: socket.socket, data, callback) -> None:
                 del sock
                 held = _HeldCallback()
                 held.arm(callback)
-                close_ops.append(held)
+                close_ops.append((bytes(data), held))
 
             scheduler.io.sock_sendall_cb = staged_sendall  # type: ignore[method-assign]
-            scheduler.io.sock_close_cb = staged_close  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = staged_close  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
 
             def exercise() -> None:
                 send_buffer.write(b"ab")
                 send_buffer.drain()
                 send_buffer.write(b"cd")
+                assert send_buffer.pending_bytes == 4
                 send_buffer.close()
-                assert [payload for payload, _held in pending_ops] == [b"ab", b"cd"]
-                assert len(close_ops) == 1
+                assert [payload for payload, _held in pending_ops] == [b"ab"]
+                assert [payload for payload, _held in close_ops] == [b"cd"]
+                # the tail is in the kernel, not in the counted in-flight total
+                assert send_buffer.pending_bytes == 2
+                assert not send_buffer.connection_lost
+                close_ops[0][1].complete(None, None)
                 assert not send_buffer.connection_lost
                 pending_ops[0][1].complete(2, None)
-                pending_ops[1][1].complete(2, None)
-                assert not send_buffer.connection_lost
-                close_ops[0].complete(None, None)
                 assert send_buffer.connection_lost
                 assert send_buffer.pending_bytes == 0
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
-            scheduler.io.sock_close_cb = real_close  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = real_close  # type: ignore[method-assign]
             writer.close()
 
     def test_write_after_close_raises(self, scheduler: SyncProactorScheduler) -> None:
@@ -835,14 +835,23 @@ class TestSendBuffer:
 
                 return callback
 
+            def send_close(sock, data, callback, *, expect=None):
+                del sock, data, expect
+                callback(None, None)
+                return None
+
+            scheduler.io.proactor.send_close = send_close  # type: ignore[method-assign]
+
             def exercise() -> None:
                 scheduler.io.sock_sendall_cb(writer, b"xy", record("send"))
                 scheduler.io.sock_shutdown_cb(writer, socket.SHUT_WR, record("shutdown"))
                 scheduler.io.sock_close_cb(writer, record("close"))
+                scheduler.io.sock_send_close_cb(writer, b"zz", record("send-close"))
                 assert calls == [
                     ("send", 2, None),
                     ("shutdown", None, None),
                     ("close", None, None),
+                    ("send-close", None, None),
                 ]
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
@@ -888,6 +897,7 @@ class TestSendBuffer:
         finally:
             reader.close()
             writer.close()
+
 
 # -- RecvIterBuffer (moved from test_proactor) --
 

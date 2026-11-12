@@ -1115,6 +1115,46 @@ class TestProactorContract:
                 writer.close()
             proactor.close()
 
+    def test_send_close_callback_is_the_close(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            payload = b"hello"
+            seen: list[tuple[object, BaseException | None]] = []
+
+            def on_close(result: object, exc: BaseException | None) -> None:
+                seen.append((result, exc))
+
+            proactor.send_close(writer, payload, on_close)
+            deadline = proactor.get_time() + 1.0
+            while proactor.get_time() < deadline and not seen:
+                proactor.wait(min(deadline, proactor.get_time() + 0.05))
+            assert seen == [(None, None)]
+            got = bytearray()
+            saw_eof = False
+            while proactor.get_time() < deadline and not saw_eof:
+                try:
+                    chunk = reader.recv(64)
+                except BlockingIOError:
+                    proactor.wait(min(deadline, proactor.get_time() + 0.05))
+                    continue
+                if chunk:
+                    got.extend(chunk)
+                    continue
+                saw_eof = True
+            assert bytes(got) == payload
+            assert saw_eof
+            assert writer.fileno() == -1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
     def test_accept_and_connect_complete_after_pumping(
         self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
     ) -> None:
@@ -2850,6 +2890,46 @@ class TestUringProactor:
             assert isinstance(proactor.ring, _FakeUringRing)
             assert proactor.ring.submitted_send_all[0][1] is payload
             assert len(proactor.ring.submitted_close) == 1
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_send_close_prepares_skip_all_send_and_callback_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _patch_uring_capabilities(monkeypatch, IORING_OP_SEND_ZC=False)
+        proactor = UringProactor(ring_factory=_FakeUringRing, completion_threads=0)
+        reader, writer = socket.socketpair()
+        try:
+            writer.setblocking(False)
+            payload = b"hello"
+            fd = writer.fileno()
+            seen: list[tuple[object, BaseException | None]] = []
+            constructed: list[Any] = []
+            assert isinstance(proactor.ring, _FakeUringRing)
+            real_construct = proactor.ring.construct_send_all
+
+            def track_construct(*args: Any, **kwargs: Any) -> Any:
+                completion = real_construct(*args, **kwargs)
+                constructed.append(completion)
+                return completion
+
+            proactor.ring.construct_send_all = track_construct  # type: ignore[method-assign]
+
+            def on_close(result: object, exc: BaseException | None) -> None:
+                seen.append((result, exc))
+
+            proactor.send_close(writer, payload, on_close)
+            assert writer.fileno() == -1
+            assert len(constructed) == 1
+            assert constructed[0].skip_all is True
+            assert proactor.ring.submitted_send_all[0][0] == fd
+            assert proactor.ring.submitted_send_all[0][1] is payload
+            assert proactor.ring.submitted_send_all[0][2] is None
+            assert proactor.ring.submitted_close[-1][0] == fd
+            assert proactor.ring.submitted_close[-1][1] is not None
+            _wait_for_uring(proactor, lambda: bool(seen))
+            assert seen == [(None, None)]
         finally:
             reader.close()
             if writer.fileno() != -1:
