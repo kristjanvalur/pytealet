@@ -531,6 +531,18 @@ class SSLStream:
         self._reader.close()
         self._writer.close()
 
+    def abort(self) -> None:
+        """Abort the inner send pipeline. Does not park.
+
+        Skips ``close_notify``. The inner writer submits the close when
+        it is not already queued, then aborts that queue. The library does
+        not call this. A server that timed out in its own ``wait_closed()``
+        may.
+        """
+
+        self._closing = True
+        self._writer.abort()
+
     def wait_closed(self) -> None:
         if self._closed:
             return

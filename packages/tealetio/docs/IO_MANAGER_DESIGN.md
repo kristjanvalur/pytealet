@@ -642,7 +642,9 @@ drop waiter only”.
   `wait_closed()` parks until the close callback has run and no counted
   send is still in flight. A `write_eof()` nowait tail and its `SHUT_WR`
   (`sock_shutdown_nowait`) are ahead of the close on the socket. `StreamServer` handler cleanup calls
-  `wait_closed()` after `close()`.
+  `wait_closed()` after `close()`. That cleanup does not abort.
+  `writer.abort()` is available when the application has timed out its
+  own wait. `SSLStream.abort()` skips `close_notify`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
   (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain
   in `io_buffers.py`. `open` is the leaf `io_manager` imports for stream-pair

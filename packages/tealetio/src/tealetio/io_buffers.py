@@ -368,6 +368,11 @@ class SendBuffer:
     ``wait_closed()`` parks until the close callback has run and no counted
     send is still in flight. It is then safe to leave the scheduler.
 
+    ``abort()`` reuses that close handle, or submits the close and then
+    asks the proactor to abort the queue the handle is on. An in-flight
+    ``send_all`` is cancelled. The close still runs. ``abort()`` does not
+    park. A ``close()`` that raises is not an abort.
+
     A failed counted send subtracts the same length and stores the error, so
     a waiter does not stay parked. A raise from the submit call is not
     stored. The ring marks a close parked behind that send abortive.
@@ -515,6 +520,24 @@ class SendBuffer:
                 self._prepend_pending(chunk)
             raise
         self._close_handle = handle
+
+    def abort(self) -> None:
+        """Abort the send pipeline. Does not park.
+
+        Uses the close handle when ``close()`` has already been accepted.
+        Otherwise submits that close, then ``abort_queue`` on the handle.
+        The proactor cancels an in-flight ``send_all`` and fails later
+        queued sends with a poisoned fd. The close still runs. A submit
+        failure from ``close()`` propagates and does not abort. A handle
+        that is no longer on a queue is a miss: an idle close may already
+        have finished, and that close was not abortive.
+        """
+
+        if not self.closed:
+            self.close()
+        handle = self._close_handle
+        if handle is not None:
+            self._io.proactor.abort_queue(handle)
 
     def wait_closed(self) -> None:
         """Park until the close callback has run and no counted send remains.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import socket
 import tempfile
 from pathlib import Path
@@ -928,6 +929,38 @@ class TestStreamsPoC:
         finally:
             conn.close()
             peer.close()
+
+    def test_writer_abort_after_close_wait_times_out(self, scheduler: SyncProactorScheduler) -> None:
+        """The application aborts after its own close wait times out."""
+
+        from tealetio.locks import TimeoutError, timeout
+
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            _stream_reader, stream_writer = open_streams(conn, scheduler=scheduler)
+            payload = b"x" * (256 * 1024)
+
+            def exercise() -> None:
+                stream_writer.write(payload)
+                stream_writer.drain_nowait()
+                stream_writer.close()
+                with pytest.raises(TimeoutError):
+                    with timeout(0.05):
+                        stream_writer.wait_closed()
+                stream_writer.abort()
+                with pytest.raises(OSError) as exc_info:
+                    stream_writer.wait_closed()
+                assert exc_info.value.errno in (errno.ECANCELED, errno.EINTR)
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            peer.close()
+            if conn.fileno() != -1:
+                conn.close()
 
     def test_stream_reader_readline_fills_from_recv_iter_chunks(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()

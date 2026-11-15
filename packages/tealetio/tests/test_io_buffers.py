@@ -100,6 +100,33 @@ class TestSendBuffer:
             if writer.fileno() != -1:
                 writer.close()
 
+    def test_abort_cancels_an_inflight_send(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            send_buffer = scheduler.io._open_send_buffer(writer)
+            payload = b"x" * (256 * 1024)
+
+            def exercise() -> None:
+                send_buffer.write(payload)
+                send_buffer.drain_nowait()
+                assert send_buffer._in_flight_bytes == len(payload)
+                send_buffer.write(b"tail")
+                send_buffer.abort()
+                assert send_buffer.closed
+                with pytest.raises(OSError) as exc_info:
+                    send_buffer.wait_closed()
+                assert exc_info.value.errno in (errno.ECANCELED, errno.EINTR)
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+
     def test_drain_below_high_water_uses_sendall(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
@@ -656,9 +683,7 @@ class TestSendBuffer:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
             writer.close()
 
-    def test_second_drain_submit_failure_restores_pending(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_second_drain_submit_failure_restores_pending(self, scheduler: SyncProactorScheduler) -> None:
         _reader, writer = socket.socketpair()
         try:
             submit_calls = 0

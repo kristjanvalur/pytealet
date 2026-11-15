@@ -954,6 +954,101 @@ class TestSelectorRecvTimeout:
             proactor.close()
 
 
+def _tiny_stream_pair() -> tuple[socket.socket, socket.socket]:
+    """A connected pair with a small window, so a large send stays in flight."""
+
+    reader, writer = socket.socketpair()
+    reader.setblocking(False)
+    writer.setblocking(False)
+    reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+    writer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+    return reader, writer
+
+
+def _linger(sock: socket.socket) -> tuple[int, int]:
+    return struct.unpack("ii", sock.getsockopt(socket.SOL_SOCKET, socket.SO_LINGER, 8))
+
+
+@pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
+class TestAbortQueue:
+    def test_abort_queue_miss_returns_false(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = socket.socketpair()
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            handle = proactor.recv(reader, 1, _noop_recv)
+            assert proactor.abort_queue(handle) is False
+            proactor.cancel_nowait(handle)
+        finally:
+            reader.close()
+            writer.close()
+            proactor.close()
+
+    def test_abort_queue_cancels_send_all_and_poisons_a_later_send(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = _tiny_stream_pair()
+        try:
+            payload = b"x" * (256 * 1024)
+            send_box, handle = _arm(proactor.send_all, writer, payload)
+            assert handle is not None
+            assert send_box.done() is False
+            assert proactor.abort_queue(handle) is True
+            assert _linger(writer) == (1, 0)
+            later_box, _later = _arm(proactor.send, writer, b"more")
+            _pump_until(proactor, lambda: send_box.done() and later_box.done())
+            assert send_box.payload == len(payload)
+            assert isinstance(send_box.exception, OSError)
+            assert send_box.exception.errno in (errno.ECANCELED, errno.EINTR)
+            assert later_box.payload is None
+            assert isinstance(later_box.exception, OSError)
+            assert later_box.exception.errno == errno.EBADF
+            close_box, _close = _arm(proactor.close_socket, writer)
+            _pump_until(proactor, close_box.done)
+            assert close_box.exception is None
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+    def test_abort_queue_on_the_close_poisons_the_queue(
+        self, proactor_factory: Callable[[], SelectorProactor | UringProactor]
+    ) -> None:
+        proactor = proactor_factory()
+        reader, writer = _tiny_stream_pair()
+        try:
+            payload = b"x" * (256 * 1024)
+            send_box, send_handle = _arm(proactor.send_all, writer, payload)
+            assert send_handle is not None
+            assert send_box.done() is False
+            shut_box, _shut = _arm(proactor.shutdown, writer, socket.SHUT_WR)
+            queued_box, _queued = _arm(proactor.send, writer, b"more")
+            close_box, close_handle = _arm(proactor.close_socket, writer)
+            assert close_handle is not None
+            assert proactor.abort_queue(close_handle) is True
+            _pump_until(
+                proactor,
+                lambda: send_box.done() and shut_box.done() and queued_box.done() and close_box.done(),
+            )
+            assert isinstance(send_box.exception, OSError)
+            assert send_box.exception.errno in (errno.ECANCELED, errno.EINTR)
+            assert isinstance(shut_box.exception, OSError)
+            assert shut_box.exception.errno == errno.EBADF
+            assert isinstance(queued_box.exception, OSError)
+            assert queued_box.exception.errno == errno.EBADF
+            assert close_box.exception is None
+        finally:
+            reader.close()
+            if writer.fileno() != -1:
+                writer.close()
+            proactor.close()
+
+
 @pytest.mark.parametrize("proactor_factory", PROACTOR_CONTRACT_FACTORIES)
 class TestProactorContract:
     def test_clock_can_be_replaced(self, proactor_factory: Callable[[], SelectorProactor | UringProactor]) -> None:

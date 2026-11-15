@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Proactor.abort_queue(handle)`` marks the write pipeline that still
+  holds ``handle`` and cancels an in-flight ``send_all`` on it.
+  ``UringProactor`` forwards to ``Ring.abort_queue``. ``SelectorProactor``
+  finds that write queue, sets ``SO_LINGER`` {1, 0}, cancels the current
+  ``send_all``, and fails later queued sends and shutdowns with ``EBADF``.
+  A queued close still runs. A miss returns false. ``SendBuffer.abort``
+  reuses the close handle, or submits the close and then aborts that
+  handle. It does not park. ``StreamWriter.abort`` and
+  ``SSLStream.abort`` do that for the writer a handler holds.
+  ``SSLStream.abort`` skips ``close_notify``. Shutdown does not call
+  ``abort``. A server that timed out in its own ``wait_closed`` may.
 - ``iowait_or_dispose(waiter, dispose_cb, *, attempts=3)`` waits on an
   ``IOWaitable`` and is optional. The first ``wait`` that returns is the
   result. A throw is followed by another ``wait``, ``attempts`` times.

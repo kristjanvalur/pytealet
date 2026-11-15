@@ -52,6 +52,8 @@ class WriteStream(Protocol):
 
     def wait_closed(self) -> None: ...
 
+    def abort(self) -> None: ...
+
 
 class StreamWriter:
     """Native tealet stream writer with synchronous methods.
@@ -169,6 +171,20 @@ class StreamWriter:
 
         self._send_buffer.wait_closed()
 
+    def abort(self) -> None:
+        """Abort the send pipeline. Does not park.
+
+        Submits the close when ``close()`` has not been accepted, then
+        aborts that queue, and closes the paired reader. The library does
+        not call this. A server that timed out in its own ``wait_closed()``
+        may. The close still runs. A later ``wait_closed()`` raises the
+        cancelled send.
+        """
+
+        self._send_buffer.abort()
+        if self._reader is not None:
+            self._reader.close()
+
     def is_closing(self) -> bool:
         """True once the buffer has accepted ``close()``."""
 
@@ -180,7 +196,7 @@ class AsyncStreamWriter(StreamWriter):
 
     Same send and close path as ``StreamWriter``. ``drain`` and
     ``wait_closed`` are coroutines around those calls. ``drain_nowait``
-    stays the synchronous submit, so the backlog can be handed to the
+    and ``abort`` stay synchronous, so the backlog can be handed to the
     proactor without entering a coroutine. Not a ``WriteStream``: the
     coroutine signatures are the asyncio shape.
     """
@@ -211,7 +227,8 @@ def shutdown_stream_writer(
 
     ``wait_closed()`` parks until the close completion. Counted sends, a
     ``write_eof()`` tail, and its ``SHUT_WR`` are ahead of that close on
-    the socket.
+    the socket. This does not abort when that wait is interrupted. The
+    caller may call ``abort()`` itself.
 
     When ``best_effort`` is false (normal handler cleanup), transport errors
     propagate. When true (discarded accepts or failed handler spawn), an

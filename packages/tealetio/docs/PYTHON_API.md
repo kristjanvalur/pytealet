@@ -529,6 +529,29 @@ Empty data is only the close, and `close_socket` may be repeated. A
 socket is closed. The tail is not added to the in-flight count.
 `wait_closed()` parks until the close callback has run and no counted
 `drain` send is still in flight.
+`Proactor.abort_queue(handle)` marks the write pipeline that still holds
+`handle`. Uring forwards to `Ring.abort_queue`. Selector finds the write
+queue by that handle. Either way an in-flight `send_all` is cancelled,
+`SO_LINGER` is set to {1, 0}, and later queued sends and shutdowns fail
+with `EBADF`. A queued close still runs. The call does not submit the
+close. A miss returns false.
+`SendBuffer.abort()` uses the close handle from `close()`, submitting
+that close first when it is not there yet, then calls `abort_queue`.
+It does not park. An idle close may already have finished before the
+abort, in which case the queue has nothing to mark.
+`StreamWriter.abort()` and `SSLStream.abort()` are that call for the
+writer a connection handler holds. `SSLStream.abort()` skips
+`close_notify`. Shutdown does not call `abort()`. A server that waits
+for the close with its own timeout may:
+
+```python
+writer.close()
+try:
+    with timeout(grace):
+        writer.wait_closed()
+except TimeoutError:
+    writer.abort()
+```
 
 `Proactor.recv` invokes `callback(RecvResult, exception)`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
@@ -1301,6 +1324,11 @@ and queues `SHUT_WR` behind it. It does not park, and it does not close
 the socket. `close()` submits any unsent tail
 with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
 does not park. That tail is not part of the in-flight count.
+`abort()` is that close, then `abort_queue` on the close handle, so an
+in-flight counted send is cancelled and the close still runs. It does
+not park. `StreamWriter.abort()` also closes the paired reader.
+`SSLStream.abort()` skips `close_notify` and aborts the inner writer.
+Shutdown leaves that call to the application.
 `wait_closed()` parks until the close callback has run and no counted send
 is still in flight. A submit that raises is not stored. The caller
 has the exception, and a chunk the call did not accept goes back on the
