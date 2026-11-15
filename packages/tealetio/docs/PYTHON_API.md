@@ -1300,9 +1300,12 @@ the socket. `close()` submits any unsent tail
 with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
 does not park. That tail is not part of the in-flight count.
 `wait_closed()` parks until the close callback has run and no counted send
-is still in flight. A failed counted send stores the error and subtracts
-the length `send_all` reported, so a waiter does not stay parked. The
-buffer does not close the socket on that send error. `close()` does.
+is still in flight. A submit that raises is not stored. The caller
+has the exception, and a chunk the call did not accept goes back on the
+backlog. A failed counted send stores the error from its callback and
+subtracts the length `send_all` reported, so a waiter does not stay
+parked. The buffer does not close the socket on that send error.
+`close()` does.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to

@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``sock_send_close_cb`` and does not park. ``wait_closed`` waits until
   that close callback has run and no counted send is still in flight.
   The buffer wakes with ``PulseEvent``.
+  A submit that raises is not stored. ``drain``, ``write_eof``, and
+  ``close`` restore a chunk the call did not accept and propagate the
+  exception. An error from a send or close callback is still stored, so
+  a parked ``drain`` or ``wait_closed`` raises it.
   ``flush`` is removed from ``SendBuffer``, stream writers, and
   ``SSLStream``.
 - ``StreamWriter.can_write_eof`` reports the half-close capability. It

@@ -369,8 +369,8 @@ class SendBuffer:
     send is still in flight. It is then safe to leave the scheduler.
 
     A failed counted send subtracts the same length and stores the error, so
-    a waiter does not stay parked. The ring marks a close parked behind that
-    send abortive.
+    a waiter does not stay parked. A raise from the submit call is not
+    stored. The ring marks a close parked behind that send abortive.
     """
 
     def __init__(
@@ -486,14 +486,12 @@ class SendBuffer:
                 self._io.sock_send_nowait(self._sock, chunk)
                 sent = True
             self._io.sock_shutdown_nowait(self._sock, socket.SHUT_WR)
-        except BaseException as exc:
+        except BaseException:
             # a send that already returned owns the bytes. putting them back
-            # would send the tail twice from a later close().
+            # would send the tail twice from a later close(). the raise is the
+            # caller's. a submit failure is not stored.
             if chunk is not None and not sent:
                 self._prepend_pending(chunk)
-            if self._send_error is None:
-                self._send_error = exc
-            self._pulse.set()
             raise
 
     def close(self) -> None:
@@ -501,8 +499,9 @@ class SendBuffer:
 
         Does not park. The tail is a nowait ``send_all`` and is not counted.
         The close handle is kept on ``_close_handle``. A submit failure puts
-        the tail back on the backlog. ``wait_closed()`` waits for the close
-        callback. A ``SHUT_WR`` submitted earlier is ahead of that close.
+        the tail back on the backlog and raises. It does not store the
+        exception or mark the close done. ``wait_closed()`` waits for the
+        close callback. A ``SHUT_WR`` submitted earlier is ahead of that close.
         """
 
         if self.closed:
@@ -511,10 +510,9 @@ class SendBuffer:
         data: _PendingSend = b"" if chunk is None else chunk
         try:
             handle = self._io.sock_send_close_cb(self._sock, data, self._finish_close)
-        except BaseException as exc:
+        except BaseException:
             if chunk is not None:
                 self._prepend_pending(chunk)
-            self._finish_close(None, exc)
             raise
         self._close_handle = handle
 
@@ -609,12 +607,13 @@ class SendBuffer:
         """Submit ``chunk``. The completion subtracts the length it reports.
 
         A submit failure puts the chunk back and subtracts that length.
+        The exception is not stored.
         """
 
         try:
             self._io.sock_sendall_cb(self._sock, chunk, self._finish_leg)
-        except BaseException as exc:
-            self._fail_submit(chunk, len(chunk), exc)
+        except BaseException:
+            self._fail_submit(chunk, len(chunk))
             raise
 
     def _finish_close(self, _result: object, exc: BaseException | None) -> None:
@@ -623,13 +622,10 @@ class SendBuffer:
             self._send_error = exc
         self._pulse.set()
 
-    def _fail_submit(self, chunk: _PendingSend, length: int, exc: BaseException) -> None:
+    def _fail_submit(self, chunk: _PendingSend, length: int) -> None:
         self._prepend_pending(chunk)
         self._in_flight_bytes -= length
         assert self._in_flight_bytes >= 0
-        if self._send_error is None:
-            self._send_error = exc
-        self._pulse.set()
 
     def _finish_leg(self, reported: object, exc: BaseException | None) -> None:
         """Subtract the length ``send_all`` reported and wake waiters.

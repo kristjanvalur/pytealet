@@ -651,11 +651,12 @@ class TestSendBuffer:
                 send_buffer.drain()
             assert send_buffer.pending_bytes == 2
             assert send_buffer._pending == b"ab"
+            assert send_buffer._send_error is None
         finally:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
             writer.close()
 
-    def test_second_drain_submit_failure_restores_pending_and_sticks_error(
+    def test_second_drain_submit_failure_restores_pending(
         self, scheduler: SyncProactorScheduler
     ) -> None:
         _reader, writer = socket.socketpair()
@@ -665,11 +666,13 @@ class TestSendBuffer:
 
             def staged_sendall(sock: socket.socket, data, callback) -> None:
                 nonlocal submit_calls
-                del sock, data, callback
+                del sock
                 submit_calls += 1
                 if submit_calls == 1:
                     return
-                raise OSError("chained submit failed")
+                if submit_calls == 2:
+                    raise OSError("chained submit failed")
+                callback(len(data), None)
 
             scheduler.io.sock_sendall_cb = staged_sendall  # type: ignore[method-assign]
             send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
@@ -680,8 +683,9 @@ class TestSendBuffer:
                 send_buffer.drain()
             # "ab" still in flight, "cd" restored to the backlog
             assert send_buffer.pending_bytes == 4
-            with pytest.raises(OSError, match="chained submit failed"):
-                send_buffer.drain()
+            assert send_buffer._send_error is None
+            send_buffer.drain()
+            assert submit_calls == 3
         finally:
             scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
             writer.close()
@@ -774,6 +778,31 @@ class TestSendBuffer:
             scheduler.io.sock_send_close_cb = real_close  # type: ignore[method-assign]
             writer.close()
 
+    def test_close_submit_failure_restores_the_tail(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            real_close = scheduler.io.sock_send_close_cb
+
+            def raising_close(sock: socket.socket, data, callback) -> None:
+                del sock, data, callback
+                raise OSError("close submit failed")
+
+            scheduler.io.sock_send_close_cb = raising_close  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer.write(b"ab")
+            with pytest.raises(OSError, match="close submit failed"):
+                send_buffer.close()
+            assert send_buffer._pending == b"ab"
+            assert send_buffer._send_error is None
+            assert not send_buffer._close_done
+            assert not send_buffer.closed
+            send_buffer.write(b"c")
+            assert send_buffer.pending_bytes == 3
+        finally:
+            scheduler.io.sock_send_close_cb = real_close  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
     def test_write_after_close_raises(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
@@ -816,7 +845,7 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
-    def test_sticky_send_error_propagates(self, scheduler: SyncProactorScheduler) -> None:
+    def test_submit_error_on_closed_socket_does_not_stick(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
             reader.setblocking(False)
@@ -831,8 +860,9 @@ class TestSendBuffer:
 
             with pytest.raises((OSError, ValueError)):
                 scheduler.run_until_complete(scheduler.spawn(sender))
-            with pytest.raises((OSError, ValueError)):
-                send_buffer.write(b"again")
+            assert send_buffer._send_error is None
+            send_buffer.write(b"again")
+            assert send_buffer.pending_bytes == len(b"helloagain")
         finally:
             reader.close()
 
