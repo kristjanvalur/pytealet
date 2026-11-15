@@ -887,7 +887,7 @@ class TestStreamsPoC:
                 stream_writer.write(b"x")
                 stream_writer.wait_closed()
                 assert sent == [b"x"]
-                assert stream_writer._closed
+                assert stream_writer._send_buffer.connection_lost
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:

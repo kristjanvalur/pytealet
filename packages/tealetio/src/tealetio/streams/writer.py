@@ -84,8 +84,6 @@ class StreamWriter:
         self._sock = sock
         self._io = io
         self._reader = reader
-        self._closing = False
-        self._closed = False
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
@@ -128,7 +126,7 @@ class StreamWriter:
         )
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
-        if self._closing or self._closed:
+        if self._send_buffer.closed:
             raise RuntimeError("StreamWriter is closed")
         self._send_buffer.write(data)
 
@@ -157,7 +155,7 @@ class StreamWriter:
     def write_eof(self) -> None:
         """Request half-close of the write side after queued data is sent."""
 
-        if self._closing or self._closed:
+        if self._send_buffer.closed:
             raise RuntimeError("write_eof() called on closed StreamWriter")
         if self._sock.fileno() == -1:
             raise RuntimeError("write_eof() called on closed StreamWriter")
@@ -171,33 +169,25 @@ class StreamWriter:
 
         if self._reader is not None:
             self._reader.close()
-        self._close_buffer()
-
-    def _close_buffer(self) -> None:
-        if self._closing or self._closed:
-            return
-        self._closing = True
         self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        """Park until the close has completed.
+        """Park until the buffer's close has completed.
 
         Counted sends, a ``write_eof()`` tail and its ``SHUT_WR``, and the
         close tail are ahead of that close on the socket, so they have
         finished too. The scheduler can then exit without dropping them.
         ``SHUT_WR`` is still only ``write_eof()``. Does not close the
-        paired reader; ``close()`` does that.
+        paired reader; ``close()`` does that. A later call asks the buffer
+        again; the buffer returns once ``connection_lost`` is set.
         """
 
-        if self._closed:
-            return
-        if not self._closing:
-            self._close_buffer()
         self._send_buffer.wait_closed()
-        self._closed = True
 
     def is_closing(self) -> bool:
-        return self._closing or self._closed
+        """True once the buffer has accepted ``close()``."""
+
+        return self._send_buffer.closed
 
 
 class AsyncStreamWriter(StreamWriter):
