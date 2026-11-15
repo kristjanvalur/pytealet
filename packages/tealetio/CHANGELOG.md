@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counted sends through ``sock_sendall_cb``. ``sock_close_wait``
   is the parking close. ``sock_sendall``, ``sock_shutdown``, and
   ``sock_close`` stay for callers that park or close without waiting.
+- ``drain_nowait()`` submits the write backlog and does not park.
+  ``drain()`` is that submit plus the high-water pause. ``start_tls``
+  calls ``drain_nowait()``, matching asyncio's drain inside ``start_tls``
+  without waiting for the watermark. Queued plaintext leaves the buffer
+  before the handshake. Bytes already in flight stay ahead of it on the
+  socket queue. ``AsyncStreamWriter`` inherits the synchronous method,
+  so the submit runs where ``drain`` is a coroutine.
 - ``sock_send_close_cb`` submits a nowait ``send_all`` and then a close.
   ``callback(None, exception)`` runs on the scheduler when the close
   completes, and the call returns that close handle. Empty data is the

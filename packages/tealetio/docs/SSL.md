@@ -161,7 +161,8 @@ is that hook: a no-op on plaintext `StreamWriter`, the TLS handshake on
 - `open_streams` does not: it is also used on the accept worker. Call
   `writer.handshake()` yourself after `wrap_ssl` / `open_streams` from a
   tealet.
-- `WriteStream.start_tls(ctx, ...)` drains plaintext, wraps
+- `WriteStream.start_tls(ctx, ...)` submits queued plaintext with
+  `drain_nowait()` (no high-water pause), wraps
   `writer.reader`, handshakes, and returns a new `(stream, stream)`. Rebind
   `reader, writer = writer.start_tls(ctx, server_hostname=...)`.
   The old objects are the ciphertext legs. `SSLStream.reader` is `self`.

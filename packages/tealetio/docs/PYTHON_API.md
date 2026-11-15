@@ -1293,7 +1293,8 @@ the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
 `SendBuffer`. `write()` only appends. `drain()` submits one counted
 `sock_sendall_cb` for the backlog and parks only while the in-flight count
-is above the high water mark. `write_eof()` nowait-sends that backlog
+is above the high water mark. `drain_nowait()` is that submit
+without the pause. `write_eof()` nowait-sends that backlog
 and queues `SHUT_WR` behind it. It does not park, and it does not close
 the socket. `close()` submits any unsent tail
 with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
@@ -1338,7 +1339,8 @@ thread; that opener must not park either.
 at the same time; `close()` is caller-synchronised. `SSLStream` muxes inner
 ciphertext I/O so both tealets can retry OpenSSL without issuing two inner
 reads or two inner drains. `WriteStream.start_tls(sslcontext, *, server_side=False, server_hostname=None)`
-upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): drain, wrap
+upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): submit queued
+plaintext with `drain_nowait()` (no high-water pause), wrap
 that reader, handshake, return `(stream, stream)`. Rebind the names; the old
 pair is the ciphertext transport. `wrap_ssl` / `start_tls` / `SSLStream` are
 public for wrapping an existing pair without `ssl=` on connect.

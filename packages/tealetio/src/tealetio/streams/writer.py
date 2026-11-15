@@ -1,4 +1,4 @@
-"""Stream writer cores and public writer types."""
+"""Native stream writer, and the asyncio-shaped subclass."""
 
 from __future__ import annotations
 
@@ -55,6 +55,8 @@ class WriteStream(Protocol):
 
     def drain(self) -> None: ...
 
+    def drain_nowait(self) -> None: ...
+
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None: ...
 
     def can_write_eof(self) -> bool: ...
@@ -62,77 +64,6 @@ class WriteStream(Protocol):
     def write_eof(self) -> None: ...
 
     def wait_closed(self) -> None: ...
-
-
-class WriterCore:
-    def __init__(
-        self,
-        *,
-        send_buffer: SendBuffer,
-        sock: socket.socket,
-        io: StreamWriterIO,
-    ) -> None:
-        self._send_buffer = send_buffer
-        self._sock = sock
-        self._io = io
-        self._closing = False
-        self._closed = False
-
-    def write(self, data: bytes | bytearray | memoryview) -> None:
-        if self._closing or self._closed:
-            raise RuntimeError("StreamWriter is closed")
-        self._send_buffer.write(data)
-
-    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
-        for line in lines:
-            self.write(line)
-
-    def drain(self) -> None:
-        self._send_buffer.drain()
-
-    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
-        self._send_buffer.set_write_buffer_limits(high, low)
-
-    def can_write_eof(self) -> bool:
-        """Socket writers support ``SHUT_WR``."""
-
-        return True
-
-    def write_eof(self) -> None:
-        """Request half-close of the write side after queued data is sent."""
-
-        if self._closing or self._closed:
-            raise RuntimeError("write_eof() called on closed StreamWriter")
-        if self._sock.fileno() == -1:
-            raise RuntimeError("write_eof() called on closed StreamWriter")
-        self._send_buffer.write_eof()
-
-    def close(self) -> None:
-        """Queue the final send and a close completion. Does not park."""
-
-        if self._closing or self._closed:
-            return
-        self._closing = True
-        self._send_buffer.close()
-
-    def wait_closed(self) -> None:
-        """Park until the close has completed.
-
-        Counted sends, a ``write_eof()`` tail and its ``SHUT_WR``, and the
-        close tail are ahead of that close on the socket, so they have
-        finished too. The scheduler can then exit without dropping them.
-        ``SHUT_WR`` is still only ``write_eof()``.
-        """
-
-        if self._closed:
-            return
-        if not self._closing:
-            self.close()
-        self._send_buffer.wait_closed()
-        self._closed = True
-
-    def is_closing(self) -> bool:
-        return self._closing or self._closed
 
 
 class StreamWriter:
@@ -152,8 +83,9 @@ class StreamWriter:
         self._send_buffer = send_buffer
         self._sock = sock
         self._io = io
-        self._core = WriterCore(send_buffer=send_buffer, sock=sock, io=io)
         self._reader = reader
+        self._closing = False
+        self._closed = False
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
         return writer_extra_info(self._sock, name, default)
@@ -178,7 +110,7 @@ class StreamWriter:
         ssl_handshake_timeout: float | None = None,
         limit: int | None = None,
     ) -> tuple[ReadStream, WriteStream]:
-        """Drain plaintext, wrap this pair as TLS, and handshake.
+        """Submit queued plaintext, wrap this pair as TLS, and handshake.
 
         Returns a new ``(stream, stream)`` pair. The old reader and writer
         become the ciphertext legs and must not be used.
@@ -196,37 +128,87 @@ class StreamWriter:
         )
 
     def write(self, data: bytes | bytearray | memoryview) -> None:
-        self._core.write(data)
+        if self._closing or self._closed:
+            raise RuntimeError("StreamWriter is closed")
+        self._send_buffer.write(data)
 
     def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
-        self._core.writelines(lines)
-
-    def close(self) -> None:
-        if self._reader is not None:
-            self._reader.close()
-        self._core.close()
-
-    def is_closing(self) -> bool:
-        return self._core.is_closing()
+        for line in lines:
+            self.write(line)
 
     def drain(self) -> None:
-        self._core.drain()
+        """Submit queued bytes and park above high water."""
+
+        self._send_buffer.drain()
+
+    def drain_nowait(self) -> None:
+        """Submit queued bytes. Does not park for the high-water mark."""
+
+        self._send_buffer.drain_nowait()
 
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
-        self._core.set_write_buffer_limits(high, low)
+        self._send_buffer.set_write_buffer_limits(high, low)
 
     def can_write_eof(self) -> bool:
-        return self._core.can_write_eof()
+        """Socket writers support ``SHUT_WR``."""
+
+        return True
 
     def write_eof(self) -> None:
-        self._core.write_eof()
+        """Request half-close of the write side after queued data is sent."""
+
+        if self._closing or self._closed:
+            raise RuntimeError("write_eof() called on closed StreamWriter")
+        if self._sock.fileno() == -1:
+            raise RuntimeError("write_eof() called on closed StreamWriter")
+        self._send_buffer.write_eof()
+
+    def close(self) -> None:
+        """Queue the final send and a close completion. Does not park.
+
+        Also closes the paired reader. ``wait_closed()`` does not.
+        """
+
+        if self._reader is not None:
+            self._reader.close()
+        self._close_buffer()
+
+    def _close_buffer(self) -> None:
+        if self._closing or self._closed:
+            return
+        self._closing = True
+        self._send_buffer.close()
 
     def wait_closed(self) -> None:
-        self._core.wait_closed()
+        """Park until the close has completed.
+
+        Counted sends, a ``write_eof()`` tail and its ``SHUT_WR``, and the
+        close tail are ahead of that close on the socket, so they have
+        finished too. The scheduler can then exit without dropping them.
+        ``SHUT_WR`` is still only ``write_eof()``. Does not close the
+        paired reader; ``close()`` does that.
+        """
+
+        if self._closed:
+            return
+        if not self._closing:
+            self._close_buffer()
+        self._send_buffer.wait_closed()
+        self._closed = True
+
+    def is_closing(self) -> bool:
+        return self._closing or self._closed
 
 
-class AsyncStreamWriter:
-    """Asyncio-shaped stream writer backed by tealet-blocking socket I/O."""
+class AsyncStreamWriter(StreamWriter):
+    """Asyncio-shaped stream writer.
+
+    Same send and close path as ``StreamWriter``. ``drain`` and
+    ``wait_closed`` are coroutines around those calls. ``drain_nowait``
+    stays the synchronous submit, so the backlog can be handed to the
+    proactor without entering a coroutine. Not a ``WriteStream``: the
+    coroutine signatures are the asyncio shape.
+    """
 
     def __init__(
         self,
@@ -236,48 +218,14 @@ class AsyncStreamWriter:
         io: StreamWriterIO,
         reader: AsyncStreamReader | None = None,
     ) -> None:
-        self._send_buffer = send_buffer
-        self._sock = sock
-        self._io = io
-        self._core = WriterCore(send_buffer=send_buffer, sock=sock, io=io)
+        super().__init__(send_buffer=send_buffer, sock=sock, io=io)
         self._reader = reader
 
-    def get_extra_info(self, name: str, default: Any = None) -> Any:
-        return writer_extra_info(self._sock, name, default)
+    async def drain(self) -> None:  # ty: ignore[incompatible-method-override]
+        StreamWriter.drain(self)
 
-    def handshake(self, timeout: float | None = None) -> None:
-        """No-op for plaintext; TLS factories implement a real handshake."""
-
-        return
-
-    def write(self, data: bytes | bytearray | memoryview) -> None:
-        self._core.write(data)
-
-    def writelines(self, lines: Iterable[bytes | bytearray | memoryview]) -> None:
-        self._core.writelines(lines)
-
-    def close(self) -> None:
-        if self._reader is not None:
-            self._reader.close()
-        self._core.close()
-
-    def is_closing(self) -> bool:
-        return self._core.is_closing()
-
-    async def drain(self) -> None:
-        self._core.drain()
-
-    def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
-        self._core.set_write_buffer_limits(high, low)
-
-    def can_write_eof(self) -> bool:
-        return self._core.can_write_eof()
-
-    def write_eof(self) -> None:
-        self._core.write_eof()
-
-    async def wait_closed(self) -> None:
-        self._core.wait_closed()
+    async def wait_closed(self) -> None:  # ty: ignore[incompatible-method-override]
+        StreamWriter.wait_closed(self)
 
 
 def shutdown_stream_writer(

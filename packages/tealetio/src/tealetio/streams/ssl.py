@@ -80,13 +80,15 @@ def start_tls(
     ssl_handshake_timeout: float | None = None,
     limit: int | None = None,
 ) -> tuple[SSLStream, SSLStream]:
-    """Drain plaintext, wrap the writer's paired reader, and handshake.
+    """Submit queued plaintext, wrap the writer's paired reader, and handshake.
 
     Returns ``(stream, stream)``. Must run on the owning scheduler tealet.
-    ``limit`` defaults to the inner reader's ``limit``.
+    ``limit`` defaults to the inner reader's ``limit``. The submit does not
+    wait for the high-water mark. Bytes already in flight stay ahead of the
+    handshake on the socket queue.
     """
 
-    writer.drain()
+    writer.drain_nowait()
     stream_reader, stream_writer = wrap_ssl(
         writer.reader,
         writer,
@@ -375,7 +377,11 @@ class SSLStream:
         ssl_handshake_timeout: float | None = None,
         limit: int | None = None,
     ) -> tuple[SSLStream, SSLStream]:
-        """Drain, wrap this pair as TLS, and handshake. Returns ``(stream, stream)``."""
+        """Submit queued plaintext, wrap this pair as TLS, and handshake.
+
+        Returns ``(stream, stream)``. The submit does not wait for the
+        high-water mark.
+        """
 
         return start_tls(
             self,
@@ -480,6 +486,11 @@ class SSLStream:
 
         self._flush_outgoing()
 
+    def drain_nowait(self) -> None:
+        """Push pending outgoing BIO bytes. Does not park for high water."""
+
+        self._flush_outgoing(nowait=True)
+
     def set_write_buffer_limits(self, high: int | None = None, low: int | None = None) -> None:
         self._writer.set_write_buffer_limits(high, low)
 
@@ -574,11 +585,18 @@ class SSLStream:
             except ssl.SSLWantWriteError:
                 self._flush_outgoing()
 
-    def _flush_outgoing(self) -> None:
-        """Drain the outgoing BIO through the inner writer, at most one tealet at a time."""
+    def _flush_outgoing(self, *, nowait: bool = False) -> None:
+        """Drain the outgoing BIO through the inner writer, at most one tealet at a time.
+
+        ``nowait`` submits through ``drain_nowait`` and returns. It does
+        not wait for another tealet's flush, and it does not wait for the
+        high-water mark.
+        """
 
         with self._write_cond:
             if self._inner_writing:
+                if nowait:
+                    return
                 self._write_cond.swait()
                 return
             self._inner_writing = True
@@ -586,7 +604,10 @@ class SSLStream:
             data = self._outgoing.read()
             if data:
                 self._writer.write(data)
-            self._writer.drain()
+            if nowait:
+                self._writer.drain_nowait()
+            else:
+                self._writer.drain()
         finally:
             with self._write_cond:
                 self._inner_writing = False

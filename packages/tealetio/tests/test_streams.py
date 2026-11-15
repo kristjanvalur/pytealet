@@ -804,7 +804,6 @@ class TestStreamsPoC:
             reader.setblocking(False)
             _stream_reader, stream_writer = open_streams(reader, scheduler=scheduler)
             assert isinstance(stream_writer._send_buffer, SendBuffer)
-            assert stream_writer._send_buffer is stream_writer._core._send_buffer
             assert stream_writer.get_extra_info("socket") is stream_writer._sock
         finally:
             reader.close()
@@ -888,7 +887,7 @@ class TestStreamsPoC:
                 stream_writer.write(b"x")
                 stream_writer.wait_closed()
                 assert sent == [b"x"]
-                assert stream_writer._core._closed
+                assert stream_writer._closed
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:

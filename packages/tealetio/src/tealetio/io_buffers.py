@@ -444,18 +444,27 @@ class SendBuffer:
             raise RuntimeError("SendBuffer is closed")
         self._append_pending(data)
 
-    def drain(self) -> None:
-        """Submit the backlog and park when the in-flight count is above high water.
+    def drain_nowait(self) -> None:
+        """Submit the backlog. Does not park for the high-water mark.
 
-        One ``sock_sendall`` takes whatever is queued. A later ``drain()`` may
-        submit another. The sum of those lengths is the backpressure bound.
-        Parks while the count is above ``high_water``, until a completion
-        brings it to ``low_water`` or below. Returns with later writes still
-        able to queue, and with earlier sends still in flight under the mark.
+        One ``sock_sendall`` takes whatever is queued. A later call may
+        submit another. The bytes leave the userspace buffer and stay in
+        flight. ``drain()`` is this submit plus the high-water pause.
         """
 
         self._submit_backlog()
         self._raise_if_failed()
+
+    def drain(self) -> None:
+        """Submit the backlog and park above high water.
+
+        Calls ``drain_nowait()``. Parks while the in-flight count is above
+        ``high_water``, until a completion brings it to ``low_water`` or
+        below. Returns with later writes still able to queue, and with
+        earlier sends still in flight under the mark.
+        """
+
+        self.drain_nowait()
         if self._in_flight_bytes > self._high_water:
             self._pulse.swait_for(self._drain_ready)
 

@@ -458,6 +458,43 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_drain_nowait_submits_without_parking(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            pending_ops: list[_HeldCallback] = []
+            real_sendall = scheduler.io.sock_sendall_cb
+
+            def staged_sendall(sock: socket.socket, data, callback) -> None:
+                del sock, data
+                held = _HeldCallback()
+                held.arm(callback)
+                pending_ops.append(held)
+
+            scheduler.io.sock_sendall_cb = staged_sendall  # type: ignore[method-assign]
+            send_buffer = SendBuffer(
+                sock=writer,
+                io=scheduler.io,
+                scheduler=scheduler,
+                high_water=4,
+                low_water=1,
+                min_write=0,
+            )
+
+            def exercise() -> None:
+                send_buffer.write(b"123456")
+                send_buffer.drain_nowait()
+                assert len(pending_ops) == 1
+                send_buffer.write(b"abcdef")
+                send_buffer.drain_nowait()
+                assert len(pending_ops) == 2
+                assert send_buffer.pending_bytes == 12
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
     def test_pending_bytes_include_in_flight_chunk(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:
