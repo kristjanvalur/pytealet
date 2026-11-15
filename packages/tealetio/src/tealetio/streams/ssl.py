@@ -541,7 +541,7 @@ class SSLStream:
         return False
 
     def write_eof(self) -> None:
-        """Reject half-close; TLS uses close_notify via ``unwrap`` / ``close``."""
+        """TLS has no TCP half-close. ``unwrap`` / ``close`` send close_notify."""
 
         raise NotImplementedError("TLS has no half-close; use unwrap() or close()")
 

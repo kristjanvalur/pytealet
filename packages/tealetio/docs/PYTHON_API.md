@@ -428,8 +428,8 @@ The result is how many bytes that call accepted. A short count is success.
 `callback(result, exception)` on the scheduler through `call_on_scheduler`:
 inline on a live turn, otherwise queued and the driver woken. The pair is
 the one `send_all` reports: the submitted length, including when the send
-fails. `SendBuffer` uses this for `drain` and `write_eof`. The `close`
-tail is `sock_send_close_cb`, not a counted send.
+fails. `SendBuffer` uses this for `drain`. `write_eof` and the `close`
+tail are nowait sends, not counted legs.
 
 `scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
 an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
@@ -440,8 +440,10 @@ after an in-flight `send_all`.
 `scheduler.io.sock_shutdown_nowait(sock, how)` is `proactor.shutdown_nowait`
 (uring direct SQE, or a nowait completion parked on the same-fd conflict
 FIFO; selector queues behind an in-flight send). It returns `None`.
-`SendBuffer.write_eof` uses `sock_shutdown_cb`. `TealetSocket.shutdown` waits
-on `sock_shutdown`.
+`SendBuffer.write_eof` uses `sock_shutdown_nowait` after a nowait
+`send_all` of the unsent tail. There is no shutdown completion to wait
+for. The socket stays open. A later `close` is queued behind that
+shutdown. `TealetSocket.shutdown` waits on `sock_shutdown`.
 `scheduler.io.sock_close_wait(sock)` is the same `close_socket` submit with
 an `IOWaiter`. `scheduler.io.sock_close_cb(sock, callback)` submits
 `Proactor.close_socket`.
@@ -526,7 +528,7 @@ Empty data is only the close, and `close_socket` may be repeated. A
 `send_close` that still has data is the caller's to avoid once the
 socket is closed. The tail is not added to the in-flight count.
 `wait_closed()` parks until the close callback has run and no counted
-`drain` or `write_eof` send is still in flight.
+`drain` send is still in flight.
 
 `Proactor.recv` invokes `callback(RecvResult, exception)`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
@@ -1291,8 +1293,9 @@ the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
 `SendBuffer`. `write()` only appends. `drain()` submits one counted
 `sock_sendall_cb` for the backlog and parks only while the in-flight count
-is above the high water mark. `write_eof()` sends that backlog and submits
-`sock_shutdown_cb` (`SHUT_WR`) behind it. `close()` submits any unsent tail
+is above the high water mark. `write_eof()` nowait-sends that backlog
+and queues `SHUT_WR` behind it. It does not park, and it does not close
+the socket. `close()` submits any unsent tail
 with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
 does not park. That tail is not part of the in-flight count.
 `wait_closed()` parks until the close callback has run and no counted send

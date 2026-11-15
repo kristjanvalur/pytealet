@@ -39,8 +39,8 @@ _RecvIterYield: TypeAlias = tuple[int, memoryview]
 _RecvIterReady: TypeAlias = tuple[None] | tuple[_RecvIterYield]
 
 _DEFAULT_HIGH_WATER = 64 * 1024
-# Stored for callers. ``write()`` does not submit at this size; ``drain()``
-# and ``write_eof()`` submit the whole backlog as one send.
+# Stored for callers. ``write()`` does not submit at this size. ``drain()``
+# submits the whole backlog as one counted send.
 _DEFAULT_MIN_WRITE = 2048
 
 
@@ -343,31 +343,34 @@ class SendBuffer:
 
     The first ``write()`` into an empty backlog keeps ``bytes`` by reference
     and snapshots a mutable buffer once. Further writes promote that backlog
-    to a ``bytearray`` and extend it. ``drain()`` and ``write_eof()`` detach
-    the whole backlog, add its length to the in-flight count, and submit one
-    ``sock_sendall_cb``. The completion is ``callback(nbytes, exception)`` on
-    the scheduler (``call_on_scheduler`` inside the IO manager): inline on a
-    live turn, otherwise queued with the driver woken. It subtracts that
-    length and ``PulseEvent.set()`` wakes a parked ``drain()`` or
-    ``wait_closed()``. It does not submit the next chunk. The buffer is not
-    re-entrant, so those updates are not under a tealet lock.
+    to a ``bytearray`` and extend it. ``drain()`` detaches the whole backlog,
+    adds its length to the in-flight count, and submits one ``sock_sendall_cb``.
+    The completion is ``callback(nbytes, exception)`` on the scheduler
+    (``call_on_scheduler`` inside the IO manager): inline on a live turn,
+    otherwise queued with the driver woken. It subtracts that length and
+    ``PulseEvent.set()`` wakes a parked ``drain()`` or ``wait_closed()``. It
+    does not submit the next chunk. The buffer is not re-entrant, so those
+    updates are not under a tealet lock.
 
     ``drain()`` parks only when the in-flight count is above the high water
     mark, and resumes at or below the low water mark. ``min_write`` is stored
     for callers and does not start a send.
 
+    ``write_eof()`` does not park and has no completion. The unsent tail is a
+    nowait ``send_all``, not a counted leg. ``SHUT_WR`` is queued behind that
+    send and behind any counted send already in flight. The socket stays
+    open. A later ``close()`` is what waits.
+
     ``close()`` does not park. Bytes not yet submitted are a nowait
     ``send_all`` inside ``sock_send_close_cb``, and that length is not added
     to the in-flight count. The callback is the close completion, queued
     behind that send and behind ``SHUT_WR`` when ``write_eof()`` has run.
-    The close handle is kept. ``wait_closed()`` parks until the close
-    callback has run and no counted send is still in flight. It is then
-    safe to leave the scheduler.
+    ``wait_closed()`` parks until the close callback has run and no counted
+    send is still in flight. It is then safe to leave the scheduler.
 
-    A failed send subtracts the same length and stores the error, so a waiter
-    does not stay parked. The ring marks a close parked behind that send
-    abortive. ``write_eof()`` submits ``SHUT_WR`` immediately; the socket
-    FIFO runs it after the counted send.
+    A failed counted send subtracts the same length and stores the error, so
+    a waiter does not stay parked. The ring marks a close parked behind that
+    send abortive.
     """
 
     def __init__(
@@ -393,9 +396,6 @@ class SendBuffer:
         self._send_error: BaseException | None = None
         self._close_done = False
         self._close_handle: OpHandle = None
-        self._eof_pending = False
-        self._shutdown_submitted = False
-        self._shutdown_done = False
         self._set_write_buffer_limits(high=high_water, low=low_water)
         if min_write is None:
             min_write = _DEFAULT_MIN_WRITE
@@ -442,8 +442,6 @@ class SendBuffer:
         self._raise_if_failed()
         if self.closed:
             raise RuntimeError("SendBuffer is closed")
-        if self._eof_pending:
-            raise RuntimeError("cannot write() after write_eof()")
         self._append_pending(data)
 
     def drain(self) -> None:
@@ -462,18 +460,32 @@ class SendBuffer:
             self._pulse.swait_for(self._drain_ready)
 
     def write_eof(self) -> None:
-        """Send the backlog and submit ``SHUT_WR`` behind that send."""
+        """Queue the backlog and ``SHUT_WR`` behind it. Does not park.
+
+        The tail is a nowait ``send_all`` and is not counted. The shutdown
+        has no callback. The socket stays open. A later ``close()`` queues
+        behind this shutdown.
+        """
 
         if self.closed:
             raise RuntimeError("SendBuffer is closed")
         self._raise_if_failed()
-        if self._eof_pending:
-            return
-        self._eof_pending = True
-        chunk = self._detach_for_send()
-        if chunk is not None:
-            self._submit_counted(chunk)
-        self._submit_shutdown()
+        chunk = self._take_pending()
+        sent = False
+        try:
+            if chunk is not None:
+                self._io.sock_send_nowait(self._sock, chunk)
+                sent = True
+            self._io.sock_shutdown_nowait(self._sock, socket.SHUT_WR)
+        except BaseException as exc:
+            # a send that already returned owns the bytes. putting them back
+            # would send the tail twice from a later close().
+            if chunk is not None and not sent:
+                self._prepend_pending(chunk)
+            if self._send_error is None:
+                self._send_error = exc
+            self._pulse.set()
+            raise
 
     def close(self) -> None:
         """Reject further writes and submit the tail with the close.
@@ -520,16 +532,6 @@ class SendBuffer:
         """
 
         return self._close_done and self._in_flight_bytes == 0 and self._send_error is None
-
-    @property
-    def eof_pending(self) -> bool:
-        return self._eof_pending
-
-    @property
-    def write_eof_done(self) -> bool:
-        """True once the ``SHUT_WR`` completion has arrived."""
-
-        return self._shutdown_done
 
     def _drain_ready(self) -> bool:
         self._raise_if_failed()
@@ -605,27 +607,6 @@ class SendBuffer:
         except BaseException as exc:
             self._fail_submit(chunk, len(chunk), exc)
             raise
-
-    def _submit_shutdown(self) -> None:
-        """Submit ``SHUT_WR``. The socket FIFO runs it after counted sends."""
-
-        if self._shutdown_submitted:
-            return
-        self._shutdown_submitted = True
-        try:
-            self._io.sock_shutdown_cb(self._sock, socket.SHUT_WR, self._finish_shutdown)
-        except BaseException as exc:
-            self._finish_shutdown_result(exc)
-            raise
-
-    def _finish_shutdown(self, _result: object, exc: BaseException | None) -> None:
-        self._finish_shutdown_result(exc)
-
-    def _finish_shutdown_result(self, exc: BaseException | None) -> None:
-        self._shutdown_done = True
-        if exc is not None and self._send_error is None:
-            self._send_error = exc
-        self._pulse.set()
 
     def _finish_close(self, _result: object, exc: BaseException | None) -> None:
         self._close_done = True

@@ -25,8 +25,8 @@ Send and close on uring go through the ring (counted `send_all`, and
 `close_socket` for the final close) so same-fd ops stay on the conflict FIFO.
 `sock_shutdown` submits `proactor.shutdown` and returns an `IOWaiter`.
 `sock_shutdown_cb` is that submit with a scheduler callback.
-`sock_shutdown_nowait` is `shutdown_nowait`. `write_eof` uses
-`sock_shutdown_cb`. `close` uses `sock_send_close_cb`: a nowait `send_all`
+`sock_shutdown_nowait` is `shutdown_nowait`. `write_eof` nowait-sends the
+unsent tail and then calls `sock_shutdown_nowait`. `close` uses `sock_send_close_cb`: a nowait `send_all`
 of the unsent tail, then a close whose callback runs on the scheduler.
 The tail is not a counted send. `wait_closed` waits for that close
 callback and for counted sends already in flight.
@@ -51,10 +51,11 @@ stdlib send/shutdown inside the selector backend.
 **Covered on the stream server/client path:**
 
 - `sock_sendall_cb` — `proactor.send_all` with the scheduler callback.
-  Stream `drain` and `write_eof` use it. `sock_sendall` remains the parking
-  waiter. The `close()` tail does not.
-- `sock_shutdown_cb` — `proactor.shutdown` (`write_eof`). `sock_shutdown`
-  returns an `IOWaiter`. `sock_shutdown_nowait` is `shutdown_nowait`.
+  Stream `drain` uses it. `sock_sendall` remains the parking
+  waiter. `write_eof` and the `close()` tail do not.
+- `sock_shutdown_cb` — `proactor.shutdown` with a scheduler callback.
+  `sock_shutdown` returns an `IOWaiter`. `write_eof` uses
+  `sock_shutdown_nowait` (`shutdown_nowait`), queued behind its nowait send.
 - `sock_send_close_cb` — nowait `send_all` of the unsent tail, then
   `proactor.close_socket`. The scheduler callback is the close
   (`SendBuffer.close`). Empty data is the close alone.
@@ -395,7 +396,7 @@ compose accept-time reads — that lives in `ProactorIOManager` and
 | Layer | Responsibility |
 |-------|----------------|
 | `Proactor` | submit continuous ops; `_emit_result(chunk)` until finish/error/cancel |
-| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; `sock_sendall_cb` submits `proactor.send_all` and delivers `callback(nbytes, exception)` on the scheduler (stream `drain`, `write_eof`); `sock_sendall` returns an `IOWaiter`; `sock_shutdown_cb` is `write_eof`; `sock_shutdown` returns an `IOWaiter`; `sock_shutdown_nowait` is `shutdown_nowait`; `sock_send_close_cb` is `SendBuffer.close` (nowait tail, callback on the close, returns the close handle); `sock_close_cb` is `close_socket` with a scheduler callback; `sock_close` is `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
+| `ProactorIOManager` | accept always submits; stream recv arms `proactor.recv_many` from `RecvIterBuffer`; `sock_sendall_cb` submits `proactor.send_all` and delivers `callback(nbytes, exception)` on the scheduler (stream `drain`); `sock_sendall` returns an `IOWaiter`; `sock_shutdown_cb` is the callback submit; `write_eof` is `sock_send_nowait` then `sock_shutdown_nowait`; `sock_shutdown` returns an `IOWaiter`; `sock_shutdown_nowait` is `shutdown_nowait`; `sock_send_close_cb` is `SendBuffer.close` (nowait tail, callback on the close); `sock_close_cb` is `close_socket` with a scheduler callback; `sock_close` is `close_socket_nowait`; worker-side accept mutation (preread, stream open); `accept_sockets` settles the `IOWaiter` on `more=False`; poll scheduler reorder |
 | Application (`streams`, custom servers) | delivery disposition after shutdown or loss of interest |
 
 ### Accept-time pre-read
@@ -614,8 +615,8 @@ drop waiter only”.
 
 - **Vector / scatter-gather send** — `SendBuffer` owns the first idle `bytes`
   payload by reference and promotes to a `bytearray` only when coalescing.
-  `drain()` / `write_eof()` submit one counted `sock_sendall_cb`
-  for the whole backlog. When `uring-api` / the proactor expose
+  `drain()` submits one counted `sock_sendall_cb` for the whole backlog.
+  `write_eof()` nowait-sends that backlog and queues `SHUT_WR` behind it. When `uring-api` / the proactor expose
   multi-buffer submit (`sendmsg` / writev-style, or a retained buffer list
   without join), stream writers can avoid the copy-join for large mixed write
   patterns. Until then, coalescing is the right default for common
@@ -639,9 +640,8 @@ drop waiter only”.
   bytes with `sock_send_close_cb` (nowait `send_all`, callback on the close)
   and does not park. That tail is not part of the in-flight count.
   `wait_closed()` parks until the close callback has run and no counted
-  send is still in flight. `SendBuffer` keeps the close handle. A
-  `write_eof()` `SHUT_WR` (`sock_shutdown_cb`) is ahead of the close on
-  the socket. `StreamServer` handler cleanup calls
+  send is still in flight. A `write_eof()` nowait tail and its `SHUT_WR`
+  (`sock_shutdown_nowait`) are ahead of the close on the socket. `StreamServer` handler cleanup calls
   `wait_closed()` after `close()`.
 - Stream endpoints live under `packages/tealetio/src/tealetio/streams/`
   (`reader`, `writer`, `open`, `connect`, `server`); IO bridge buffers remain

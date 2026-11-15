@@ -94,9 +94,9 @@ class WriterCore:
         self._send_buffer.set_write_buffer_limits(high, low)
 
     def can_write_eof(self) -> bool:
-        return (
-            not self._closing and not self._closed and not self._send_buffer.eof_pending and self._sock.fileno() != -1
-        )
+        """Socket writers support ``SHUT_WR``."""
+
+        return True
 
     def write_eof(self) -> None:
         """Request half-close of the write side after queued data is sent."""
@@ -118,10 +118,10 @@ class WriterCore:
     def wait_closed(self) -> None:
         """Park until the close has completed.
 
-        Counted sends, the close tail, and a ``write_eof()`` ``SHUT_WR`` are
-        ahead of that close on the socket, so they have finished too. The
-        scheduler can then exit without dropping them. ``SHUT_WR`` is still
-        only ``write_eof()``.
+        Counted sends, a ``write_eof()`` tail and its ``SHUT_WR``, and the
+        close tail are ahead of that close on the socket, so they have
+        finished too. The scheduler can then exit without dropping them.
+        ``SHUT_WR`` is still only ``write_eof()``.
         """
 
         if self._closed:
@@ -287,8 +287,9 @@ def shutdown_stream_writer(
 ) -> None:
     """Close a stream writer and wait until its close has completed.
 
-    ``wait_closed()`` parks until the close completion. Counted sends and a
-    pending ``SHUT_WR`` are ahead of that close on the socket.
+    ``wait_closed()`` parks until the close completion. Counted sends, a
+    ``write_eof()`` tail, and its ``SHUT_WR`` are ahead of that close on
+    the socket.
 
     When ``best_effort`` is false (normal handler cleanup), transport errors
     propagate. When true (discarded accepts or failed handler spawn), an

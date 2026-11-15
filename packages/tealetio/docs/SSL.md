@@ -186,9 +186,9 @@ while True:
 
 Successful `write` / `do_handshake` / `unwrap` / `read` also flush the outgoing
 BIO (a read can emit handshake or KeyUpdate bytes without `WantWrite`).
-`read(-1)` loops until TLS EOF (`SSLZeroReturnError` or empty). `write_eof` is
-not implemented: TLS has `close_notify` via `unwrap`/`close`, not TCP
-half-close. `can_write_eof` is false.
+`read(-1)` loops until TLS EOF (`SSLZeroReturnError` or empty). `write_eof`
+raises `NotImplementedError`. TLS ends the write side with `close_notify`
+via `unwrap` or `close`. `can_write_eof` is false.
 
 One `SSLObject` is shared by read and write. Calls stay sequential on the
 scheduler thread (no park inside `sslobj.*`). Inner stream ops are the mux:
@@ -222,6 +222,5 @@ Not in this layer:
 - `ssl=` with `async_=True` (hosted asyncio TLS, or native `ssl=` with `async_=False`)
 - `ssl_shutdown_timeout`
 - kTLS
-- `write_eof` on TLS (`unwrap` / `close` send close_notify)
 - wrapping `ssl.SSLSocket`
 - instantiating `asyncio.sslproto.SSLProtocol` on native streams

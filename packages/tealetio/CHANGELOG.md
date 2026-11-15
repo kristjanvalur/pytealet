@@ -22,8 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``send_all``, ``shutdown``, and ``close_socket`` and run
   ``callback(result, exception)`` on the scheduler through
   ``call_on_scheduler``. The callback runs inline on a live turn, and is
-  queued with a driver wake otherwise. ``SendBuffer`` submits counted
-  sends and shutdown through these callbacks. ``sock_close_wait``
+  queued with a driver wake otherwise. ``SendBuffer.drain`` submits
+  counted sends through ``sock_sendall_cb``. ``sock_close_wait``
   is the parking close. ``sock_sendall``, ``sock_shutdown``, and
   ``sock_close`` stay for callers that park or close without waiting.
 - ``sock_send_close_cb`` submits a nowait ``send_all`` and then a close.
@@ -44,17 +44,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- ``SendBuffer.write`` only appends. ``drain`` and ``write_eof`` each
-  submit one counted ``sock_sendall_cb``. The in-flight count is the sum
-  of those lengths. ``drain`` parks only while that count is above the
-  high water mark. A failed ``send_all`` reports the submitted length,
-  and the buffer subtracts it. ``write_eof`` submits ``sock_shutdown_cb``.
-  ``close`` submits the unsent tail with ``sock_send_close_cb``, keeps
-  the close handle, and does not park. ``wait_closed`` waits until that
-  close callback has run and no counted send is still in flight. The
-  buffer wakes with ``PulseEvent``.
+- ``SendBuffer.write`` only appends. ``drain`` submits one counted
+  ``sock_sendall_cb``. The in-flight count is the sum of those lengths.
+  ``drain`` parks only while that count is above the high water mark. A
+  failed ``send_all`` reports the submitted length, and the buffer
+  subtracts it. ``write_eof`` nowait-sends the unsent tail and queues
+  ``SHUT_WR`` behind it. There is no shutdown completion. The socket
+  stays open. ``close`` submits any still-unsent tail with
+  ``sock_send_close_cb`` and does not park. ``wait_closed`` waits until
+  that close callback has run and no counted send is still in flight.
+  The buffer wakes with ``PulseEvent``.
   ``flush`` is removed from ``SendBuffer``, stream writers, and
   ``SSLStream``.
+- ``StreamWriter.can_write_eof`` reports the half-close capability. It
+  stays true for a socket writer. ``SSLStream.can_write_eof`` stays false,
+  and ``SSLStream.write_eof`` raises ``NotImplementedError``.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.
