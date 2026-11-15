@@ -12,19 +12,6 @@ from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import run_coro, writer_extra_info
 
 
-class StreamWriterIO(Protocol):
-    """IO manager slice needed to shut down and close a stream writer socket.
-
-    A subset of ``SocketIO``; ``ProactorIOManager`` satisfies this structurally.
-    """
-
-    def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
-
-    def sock_close(self, sock: socket.socket) -> None: ...
-
-    def sock_send_close(self, sock: socket.socket, data: bytes | bytearray | memoryview) -> None: ...
-
-
 class WriteStream(Protocol):
     """Writable half of a native tealet stream pair."""
 
@@ -77,12 +64,10 @@ class StreamWriter:
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
-        io: StreamWriterIO,
         reader: StreamReader | None = None,
     ) -> None:
         self._send_buffer = send_buffer
         self._sock = sock
-        self._io = io
         self._reader = reader
 
     def get_extra_info(self, name: str, default: Any = None) -> Any:
@@ -205,10 +190,9 @@ class AsyncStreamWriter(StreamWriter):
         *,
         send_buffer: SendBuffer,
         sock: socket.socket,
-        io: StreamWriterIO,
         reader: AsyncStreamReader | None = None,
     ) -> None:
-        super().__init__(send_buffer=send_buffer, sock=sock, io=io)
+        super().__init__(send_buffer=send_buffer, sock=sock)
         self._reader = reader
 
     async def drain(self) -> None:  # ty: ignore[incompatible-method-override]

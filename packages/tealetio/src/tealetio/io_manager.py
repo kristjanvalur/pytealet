@@ -343,9 +343,9 @@ class SocketIO(Protocol):
     def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
 
-# Stream-facing protocol slices live in ``streams.open`` / ``streams.writer`` as
-# ``StreamOpenIO`` and ``StreamWriterIO``. ``ProactorIOManager`` satisfies both
-# structurally without inheriting those protocols.
+# The stream-facing protocol slice lives in ``streams.open`` as
+# ``StreamOpenIO``. ``ProactorIOManager`` satisfies it structurally without
+# inheriting that protocol.
 
 
 @runtime_checkable
@@ -599,8 +599,8 @@ class ProactorIOManager:
     remains a blocking iterator over receive chunks. Always owned by a
     proactor scheduler.
 
-    Structurally implements ``StreamOpenIO`` and ``StreamWriterIO`` (defined in
-    ``streams.open`` / ``streams.writer``) for stream-pair construction.
+    Structurally implements ``StreamOpenIO`` (defined in ``streams.open``)
+    for stream-pair construction.
     """
 
     def __init__(

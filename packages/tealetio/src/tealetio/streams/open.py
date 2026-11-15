@@ -14,7 +14,7 @@ from ..socket_helpers import socket
 from ..stream_diag import accept_path_mark
 from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import DEFAULT_LIMIT
-from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO, WriteStream
+from .writer import AsyncStreamWriter, StreamWriter, WriteStream
 
 __all__ = [
     "AsyncClientHandler",
@@ -125,13 +125,12 @@ def default_stream_factory(
     """
 
     fd = sock.fileno()
-    writer_io = cast(StreamWriterIO, io)
     recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
     accept_path_mark(fd, "recv_iter")
     send_buffer = open_send_buffer(io, sock)
     accept_path_mark(fd, "send_buf")
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
+    writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=reader)
     accept_path_mark(fd, "stream_objs")
     return reader, writer
 
@@ -149,11 +148,10 @@ def default_async_stream_factory(
     Same ``buffer_pool`` / ``owns_pool`` contract as ``default_stream_factory``.
     """
 
-    writer_io = cast(StreamWriterIO, io)
     recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
     send_buffer = open_send_buffer(io, sock)
     reader = AsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
+    writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=reader)
     return reader, writer
 
 

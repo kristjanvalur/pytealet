@@ -144,7 +144,7 @@ Avoid one giant `IOManager` protocol. Suggested slices:
 | `FileIO` | positioned `open` | protocol in `io_manager.py`; `ProactorIOManager` |
 | `IOFile` | positioned binary read/write/seek/close on an opened handle | protocol in `files.py`; `ProactorFile` today |
 | `ServerIO` | `SocketIO` + proactor submission (`accept_many`, …) | protocol in `io_manager.py`; stream servers |
-| `StreamOpenIO` / `StreamWriterIO` | narrow slices for stream-pair buffer open | protocols in `streams/open.py` and `streams/writer.py`; **not** exported from `io_manager` or top-level `tealetio` — `ProactorIOManager` satisfies them structurally |
+| `StreamOpenIO` | narrow slice for opening stream buffers | protocol in `streams/open.py`; **not** exported from `io_manager` or top-level `tealetio` — `ProactorIOManager` satisfies it structurally |
 | `StreamIO` (optional) | `open_connection`, `start_server` | module-level in `streams` |
 
 `connect_tcp` is the multi-address TCP connect. It blocks the calling tealet

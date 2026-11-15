@@ -4,13 +4,12 @@ import asyncio
 import socket
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from tealetio import CancelledError, Event, connect_tcp, set_scheduler
 from tealetio.tasks import DefaultTaskFactory
-from tealetio.io_manager import ProactorIOManager
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
@@ -203,9 +202,7 @@ class TestStreamsPoC:
                 recv_buffer = _open_recv_buffer(io, sock, None)
                 send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = StreamWriter(
-                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
-                )
+                stream_writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -300,9 +297,7 @@ class TestStreamsPoC:
                 recv_buffer = _open_recv_buffer(io, sock, None)
                 send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedAsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = AsyncStreamWriter(
-                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
-                )
+                stream_writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -817,7 +812,6 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
             stream_writer.write(b"xy")
 
@@ -845,7 +839,6 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
             stream_writer.write(b"z")
             assert not stream_writer.is_closing()
@@ -880,7 +873,6 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
 
             def exercise() -> None:
@@ -909,7 +901,6 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
             close_calls: list[tuple[socket.socket, bytes]] = []
