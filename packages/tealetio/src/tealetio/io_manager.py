@@ -194,9 +194,9 @@ class SocketIO(Protocol):
 
     Plain oneshots return ``IOWaiter`` (callback + opaque ``OpHandle``).
     ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
-    ``sock_sendall_cb``, ``sock_shutdown_cb``, ``sock_close_cb``, and
-    ``sock_send_close_cb`` deliver ``callback(result, exception)`` on the
-    scheduler and return ``None``. ``sock_send_close_cb`` fires on the close.
+    ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` deliver
+    ``callback(result, exception)`` on the scheduler and return ``None``.
+    ``sock_send_close_cb`` fires on the close and returns that close handle.
     ``sock_close_wait`` is the parking close.
     ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
     nowait (``None``). Compose helpers (``sock_accept`` with preread,
@@ -246,7 +246,7 @@ class SocketIO(Protocol):
         sock: socket.socket,
         data: SocketSendBuffer,
         callback: _IoCallback,
-    ) -> None: ...
+    ) -> OpHandle: ...
 
     def sock_send_iter(
         self,
@@ -889,16 +889,19 @@ class ProactorIOManager:
         sock: socket.socket,
         data: Any,
         callback: _IoCallback,
-    ) -> None:
+    ) -> OpHandle:
         """Nowait ``send_all`` of ``data``, then close. The callback is the close.
 
         ``callback(None, exception)`` runs on the scheduler when the close
         completes, including when ``data`` is empty (close only). The send
         has no callback and is not a counted leg. The socket FIFO runs the
         close after that send and after any earlier send or shutdown.
+        Returns the close handle. Empty data is ``close_socket``, which may
+        be repeated. A call with data is the caller's to avoid once the
+        socket is closed.
         """
 
-        self.proactor.send_close(
+        return self.proactor.send_close(
             sock,
             data,
             self._callback_on_scheduler(callback),

@@ -951,6 +951,8 @@ class Proactor(Protocol):
         """Nowait ``send_all`` of ``data``, then close. ``callback(None, exception)`` is the close.
 
         The send has no callback. Empty ``data`` is only the close.
+        ``close_socket`` may be repeated. ``send_close`` with data is the
+        caller's to avoid once the socket is closed.
         """
         ...
 
@@ -1930,6 +1932,8 @@ class SelectorProactor(ProactorBase):
 
         The send completion stays internal. The close is queued on the write
         FIFO behind that send. Empty ``data`` is only ``close_socket``.
+        ``close_socket`` may be repeated. ``send_close`` with data is the
+        caller's to avoid once the socket is closed.
         """
 
         self._check_open()
@@ -2001,13 +2005,23 @@ class SelectorProactor(ProactorBase):
         self._run_or_enqueue_write(sock, run)
 
     def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
-        """Close ``sock`` after any in-flight send on this fd."""
+        """Close ``sock`` after any in-flight send on this fd.
+
+        The returned token is the queued close. It is done once that close
+        runs. Cancelling it drops a close that is still on the write FIFO.
+        """
+
+        operation = _spawn_operation("close", callback)
 
         def run() -> None:
+            if operation.done():
+                return
+            operation._done = True
+            operation._callback = None
             _call_sync_callback(callback, sock.close, void=True)
 
-        self._run_or_enqueue_write(sock, run)
-        return None
+        self._run_or_enqueue_write(sock, run, operation)
+        return operation
 
     def accept_many(
         self,
@@ -3390,10 +3404,10 @@ class UringProactor(ProactorBase):
             return
         flags = self._send_sqe_flags(expect=expect)
         fd = sock.detach()
-        if fd == -1:
-            return
         # detach first so Python cannot close an in-flight fd. construct/prepare
         # failures after this are usage or internal errors; we do not recover the fd.
+        # an already detached socket is the caller's mistake. prepare of that
+        # fd is left as it is.
         completion = self._ring.construct_send_all(fd, data, flags)
         completion.skip_all = True
         close = self._ring.construct_close_nowait(fd)
@@ -3411,18 +3425,19 @@ class UringProactor(ProactorBase):
 
         The send is ``skip_all``. The close completion is the only callback
         and parks on the send-all conflict FIFO. Empty ``data`` is
-        ``close_socket``. The fd is detached before either SQE is prepared.
+        ``close_socket``, which may be repeated. ``send_close`` with data
+        is the caller's to avoid once the socket is closed. The fd is
+        detached before either SQE is prepared.
         """
 
         if not data:
             return self.close_socket(sock, callback)
         flags = self._send_sqe_flags(expect=expect)
         fd = sock.detach()
-        if fd == -1:
-            callback(None, None)
-            return None
         # detach first so Python cannot close an in-flight fd. construct/prepare
         # failures after this are usage or internal errors; we do not recover the fd.
+        # an already detached socket is the caller's mistake. prepare of that
+        # fd is left as it is.
         completion = self._ring.construct_send_all(fd, data, flags)
         completion.skip_all = True
         close = self._ring.construct_close(fd, (_void_result_cqe, callback, ()))

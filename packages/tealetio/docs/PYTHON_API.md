@@ -520,8 +520,11 @@ then prepares `skip_all` `send_all` and the close together so the close
 parks on the conflict FIFO. Selector queues the close on the write FIFO
 behind the send.
 `scheduler.io.sock_send_close_cb(sock, data, callback)` delivers that
-close callback on the scheduler. `SendBuffer.close` uses it for the
-unsent tail and does not add that tail to the in-flight count.
+close callback on the scheduler and returns the close handle.
+`SendBuffer.close` uses it for the unsent tail and keeps that handle.
+Empty data is only the close, and `close_socket` may be repeated. A
+`send_close` that still has data is the caller's to avoid once the
+socket is closed. The tail is not added to the in-flight count.
 `wait_closed()` parks until the close callback has run and no counted
 `drain` or `write_eof` send is still in flight.
 

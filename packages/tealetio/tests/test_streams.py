@@ -825,6 +825,7 @@ class TestStreamsPoC:
             def finish_close() -> bytes:
                 stream_writer.close()
                 assert stream_writer.is_closing()
+                assert stream_writer._send_buffer._close_handle is not None
                 stream_writer.wait_closed()
                 data = scheduler.io.sock_recv(peer, 2).wait()
                 while stream_writer._sock.fileno() != -1:
@@ -872,9 +873,9 @@ class TestStreamsPoC:
             sent: list[bytes] = []
             real = scheduler.io.sock_send_close_cb
 
-            def track_send_close(sock: socket.socket, data, callback) -> None:
+            def track_send_close(sock: socket.socket, data, callback):
                 sent.append(bytes(data))
-                real(sock, data, callback)
+                return real(sock, data, callback)
 
             scheduler.io.sock_send_close_cb = track_send_close  # type: ignore[method-assign]
             stream_writer = StreamWriter(
@@ -920,9 +921,9 @@ class TestStreamsPoC:
                 shutdown_calls.append((sock, how))
                 real_shutdown(sock, how, callback)
 
-            def track_close(sock: socket.socket, data, callback) -> None:
+            def track_close(sock: socket.socket, data, callback):
                 close_calls.append((sock, bytes(data)))
-                real_close(sock, data, callback)
+                return real_close(sock, data, callback)
 
             scheduler.io.sock_shutdown_cb = track_shutdown  # type: ignore[method-assign]
             scheduler.io.sock_send_close_cb = track_close  # type: ignore[method-assign]

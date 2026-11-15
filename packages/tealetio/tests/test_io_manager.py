@@ -322,6 +322,7 @@ class _MockProactor:
         callback(None, None)
         if sock.fileno() != -1:
             sock.close()
+        return "close-handle"
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         self.shutdown_nowait_calls.append((sock, how))
@@ -1737,7 +1738,7 @@ class TestProactorIOManagerDirect:
             def on_close(result: object, exc: BaseException | None) -> None:
                 seen.append((result, exc))
 
-            assert io.sock_send_close_cb(sock, b"hello", on_close) is None
+            assert io.sock_send_close_cb(sock, b"hello", on_close) == "close-handle"
             assert len(proactor.send_close_calls) == 1
             assert proactor.send_close_calls[0][0] is sock
             assert proactor.send_close_calls[0][1] == b"hello"

@@ -708,11 +708,14 @@ class TestSendBuffer:
                 held.arm(callback)
                 pending_ops.append((payload, held))
 
-            def staged_close(sock: socket.socket, data, callback) -> None:
+            close_handle = object()
+
+            def staged_close(sock: socket.socket, data, callback) -> object:
                 del sock
                 held = _HeldCallback()
                 held.arm(callback)
                 close_ops.append((bytes(data), held))
+                return close_handle
 
             scheduler.io.sock_sendall_cb = staged_sendall  # type: ignore[method-assign]
             scheduler.io.sock_send_close_cb = staged_close  # type: ignore[method-assign]
@@ -726,6 +729,7 @@ class TestSendBuffer:
                 send_buffer.close()
                 assert [payload for payload, _held in pending_ops] == [b"ab"]
                 assert [payload for payload, _held in close_ops] == [b"cd"]
+                assert send_buffer._close_handle is close_handle
                 # the tail is in the kernel, not in the counted in-flight total
                 assert send_buffer.pending_bytes == 2
                 assert not send_buffer.connection_lost

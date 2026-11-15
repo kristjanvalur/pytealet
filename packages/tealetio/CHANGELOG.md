@@ -28,8 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``sock_close`` stay for callers that park or close without waiting.
 - ``sock_send_close_cb`` submits a nowait ``send_all`` and then a close.
   ``callback(None, exception)`` runs on the scheduler when the close
-  completes. Empty data is the close alone. ``SendBuffer.close`` uses it
-  for the unsent tail, and that tail is not part of the in-flight count.
+  completes, and the call returns that close handle. Empty data is the
+  close alone, and that close may be repeated. A call that still has
+  data is the caller's to avoid once the socket is closed.
+  ``SendBuffer.close`` keeps the handle. The tail is not part of the
+  in-flight count.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.
@@ -46,9 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of those lengths. ``drain`` parks only while that count is above the
   high water mark. A failed ``send_all`` reports the submitted length,
   and the buffer subtracts it. ``write_eof`` submits ``sock_shutdown_cb``.
-  ``close`` submits the unsent tail with ``sock_send_close_cb`` and does
-  not park. ``wait_closed`` waits until that close callback has run and
-  no counted send is still in flight. The buffer wakes with ``PulseEvent``.
+  ``close`` submits the unsent tail with ``sock_send_close_cb``, keeps
+  the close handle, and does not park. ``wait_closed`` waits until that
+  close callback has run and no counted send is still in flight. The
+  buffer wakes with ``PulseEvent``.
   ``flush`` is removed from ``SendBuffer``, stream writers, and
   ``SSLStream``.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the

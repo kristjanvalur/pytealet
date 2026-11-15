@@ -360,8 +360,9 @@ class SendBuffer:
     ``send_all`` inside ``sock_send_close_cb``, and that length is not added
     to the in-flight count. The callback is the close completion, queued
     behind that send and behind ``SHUT_WR`` when ``write_eof()`` has run.
-    ``wait_closed()`` parks until the close callback has run and no counted
-    send is still in flight. It is then safe to leave the scheduler.
+    The close handle is kept. ``wait_closed()`` parks until the close
+    callback has run and no counted send is still in flight. It is then
+    safe to leave the scheduler.
 
     A failed send subtracts the same length and stores the error, so a waiter
     does not stay parked. The ring marks a close parked behind that send
@@ -390,10 +391,8 @@ class SendBuffer:
         self._pending_bytes = 0
         self._in_flight_bytes = 0
         self._send_error: BaseException | None = None
-        self._closed = False
-        self._connection_lost = False
-        self._close_submitted = False
         self._close_done = False
+        self._close_handle: OpHandle = None
         self._eof_pending = False
         self._shutdown_submitted = False
         self._shutdown_done = False
@@ -441,7 +440,7 @@ class SendBuffer:
         if not data:
             return
         self._raise_if_failed()
-        if self._closed:
+        if self.closed:
             raise RuntimeError("SendBuffer is closed")
         if self._eof_pending:
             raise RuntimeError("cannot write() after write_eof()")
@@ -465,7 +464,7 @@ class SendBuffer:
     def write_eof(self) -> None:
         """Send the backlog and submit ``SHUT_WR`` behind that send."""
 
-        if self._closed:
+        if self.closed:
             raise RuntimeError("SendBuffer is closed")
         self._raise_if_failed()
         if self._eof_pending:
@@ -480,30 +479,47 @@ class SendBuffer:
         """Reject further writes and submit the tail with the close.
 
         Does not park. The tail is a nowait ``send_all`` and is not counted.
-        ``wait_closed()`` waits for the close callback. A ``SHUT_WR``
-        submitted earlier is ahead of that close on the socket.
+        The close handle is kept on ``_close_handle``. A submit failure puts
+        the tail back on the backlog. ``wait_closed()`` waits for the close
+        callback. A ``SHUT_WR`` submitted earlier is ahead of that close.
         """
 
-        if self._closed:
+        if self.closed:
             return
-        self._closed = True
-        self._submit_send_close(self._take_pending())
+        chunk = self._take_pending()
+        data: _PendingSend = b"" if chunk is None else chunk
+        try:
+            handle = self._io.sock_send_close_cb(self._sock, data, self._finish_close)
+        except BaseException as exc:
+            if chunk is not None:
+                self._prepend_pending(chunk)
+            self._finish_close(None, exc)
+            raise
+        self._close_handle = handle
 
     def wait_closed(self) -> None:
-        """Park until ``connection_lost``. Calls ``close()`` first."""
+        """Park until the close callback has run and no counted send remains.
+
+        Calls ``close()`` first.
+        """
 
         self.close()
         self._pulse.swait_for(self._closed_ready)
 
     @property
     def closed(self) -> bool:
-        return self._closed
+        """True once ``close()`` has been accepted."""
+
+        return self._close_handle is not None
 
     @property
     def connection_lost(self) -> bool:
-        """True once the close has completed and no counted send is in flight."""
+        """True once the close callback has run and no counted send remains.
 
-        return self._connection_lost
+        A send error keeps this false. ``wait_closed()`` raises that error.
+        """
+
+        return self._close_done and self._in_flight_bytes == 0 and self._send_error is None
 
     @property
     def eof_pending(self) -> bool:
@@ -521,7 +537,7 @@ class SendBuffer:
 
     def _closed_ready(self) -> bool:
         self._raise_if_failed()
-        return self._connection_lost
+        return self.connection_lost
 
     def _raise_if_failed(self) -> None:
         if self._send_error is not None:
@@ -563,7 +579,7 @@ class SendBuffer:
     def _submit_backlog(self) -> None:
         """Detach the backlog and submit it as one counted ``sock_sendall_cb``."""
 
-        if self._closed:
+        if self.closed:
             raise RuntimeError("SendBuffer is closed")
         self._raise_if_failed()
         chunk = self._detach_for_send()
@@ -611,47 +627,11 @@ class SendBuffer:
             self._send_error = exc
         self._pulse.set()
 
-    def _submit_send_close(self, chunk: _PendingSend | None) -> None:
-        """Nowait-send ``chunk`` if any, and submit the close behind it.
-
-        ``chunk`` is not added to the in-flight count. The callback is the
-        close completion. A submit failure puts ``chunk`` back on the backlog.
-        """
-
-        if self._close_submitted:
-            return
-        self._close_submitted = True
-        data: _PendingSend = b"" if chunk is None else chunk
-        try:
-            self._io.sock_send_close_cb(self._sock, data, self._finish_close)
-        except BaseException as exc:
-            if chunk is not None:
-                self._prepend_pending(chunk)
-            self._finish_close_result(exc)
-            raise
-
     def _finish_close(self, _result: object, exc: BaseException | None) -> None:
-        self._finish_close_result(exc)
-
-    def _finish_close_result(self, exc: BaseException | None) -> None:
         self._close_done = True
         if exc is not None and self._send_error is None:
             self._send_error = exc
-        self._note_connection_lost()
         self._pulse.set()
-
-    def _note_connection_lost(self) -> None:
-        """Set the flag once the close has completed and no send is in flight.
-
-        A ``SHUT_WR`` is submitted ahead of the close, so its completion has
-        already been delivered.
-        """
-
-        if not self._closed or self._in_flight_bytes != 0 or not self._close_done:
-            return
-        if self._send_error is not None:
-            return
-        self._connection_lost = True
 
     def _fail_submit(self, chunk: _PendingSend, length: int, exc: BaseException) -> None:
         self._prepend_pending(chunk)
@@ -659,7 +639,6 @@ class SendBuffer:
         assert self._in_flight_bytes >= 0
         if self._send_error is None:
             self._send_error = exc
-        self._note_connection_lost()
         self._pulse.set()
 
     def _finish_leg(self, reported: object, exc: BaseException | None) -> None:
@@ -673,7 +652,6 @@ class SendBuffer:
         assert self._in_flight_bytes >= 0
         if exc is not None and self._send_error is None:
             self._send_error = exc
-        self._note_connection_lost()
         self._pulse.set()
 
     def _prepend_pending(self, chunk: SocketSendBuffer) -> None:
