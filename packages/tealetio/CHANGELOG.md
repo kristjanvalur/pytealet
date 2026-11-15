@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``AsyncStreamReader`` subclasses ``StreamReader``. ``read``,
+  ``readinto``, ``readexactly``, and ``readline`` are coroutines around
+  the synchronous methods. ``ReaderCore`` is gone.
 - ``SendBuffer.write`` only appends. ``drain`` submits one counted
   ``sock_sendall_cb``. The in-flight count is the sum of those lengths.
   ``drain`` parks only while that count is above the high water mark. A

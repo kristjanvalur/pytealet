@@ -227,12 +227,12 @@ class TestStreamsPoC:
             factory = pooled_default_stream_factory()
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            pool_a = stream_a._core._recv_buffer._buffer_pool
-            pool_b = stream_b._core._recv_buffer._buffer_pool
+            pool_a = stream_a._recv_buffer._buffer_pool
+            pool_b = stream_b._recv_buffer._buffer_pool
             assert pool_a is not pool_b
             assert pool_a is not scheduler.io.shared_recv_buffer_pool()
-            assert stream_a._core._recv_buffer._owns_pool is True
-            assert stream_b._core._recv_buffer._owns_pool is True
+            assert stream_a._recv_buffer._owns_pool is True
+            assert stream_b._recv_buffer._owns_pool is True
         finally:
             reader_a.close()
             writer_a.close()
@@ -249,12 +249,12 @@ class TestStreamsPoC:
             factory = pooled_default_stream_factory(pool=shared)
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            assert stream_a._core._recv_buffer._buffer_pool is shared
-            assert stream_b._core._recv_buffer._buffer_pool is shared
-            assert stream_a._core._recv_buffer._owns_pool is False
+            assert stream_a._recv_buffer._buffer_pool is shared
+            assert stream_b._recv_buffer._buffer_pool is shared
+            assert stream_a._recv_buffer._owns_pool is False
             # first close must not dispose the shared pool for the peer stream
             stream_a.close()
-            assert stream_b._core._recv_buffer._buffer_pool is shared
+            assert stream_b._recv_buffer._buffer_pool is shared
             assert scheduler.io.acquire_recv_buffer_pool() is not shared
         finally:
             reader_a.close()
@@ -276,7 +276,7 @@ class TestStreamsPoC:
                 return default_stream_factory(io, sock, limit=limit, buffer_pool=pool)
 
             stream_reader, stream_writer = open_streams(reader, stream_factory=factory, scheduler=scheduler)
-            assert stream_reader._core._recv_buffer._owns_pool is False
+            assert stream_reader._recv_buffer._owns_pool is False
             stream_writer.close()
             stream_reader.close()
             # borrowed: stream close must not put this lease on the idle stack
@@ -445,7 +445,7 @@ class TestStreamsPoC:
                     chunk = stream_reader.read(1)
                     assert len(chunk) == 1
                     out.extend(chunk)
-                assert stream_reader._core._buffer_available() == 0
+                assert stream_reader._buffer_available() == 0
                 return bytes(out)
 
             assert run_scheduler_task(scheduler, exercise) == payload
@@ -786,7 +786,7 @@ class TestStreamsPoC:
         try:
             reader.setblocking(False)
             stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
-            assert isinstance(stream_reader._core._recv_buffer, RecvIterBuffer)
+            assert isinstance(stream_reader._recv_buffer, RecvIterBuffer)
         finally:
             reader.close()
             writer.close()

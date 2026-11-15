@@ -1,4 +1,4 @@
-"""Stream reader cores and public reader types."""
+"""Native stream reader, and the asyncio-shaped subclass."""
 
 from __future__ import annotations
 
@@ -29,7 +29,12 @@ class ReadStream(Protocol):
     def readline(self) -> bytes: ...
 
 
-class ReaderCore:
+class StreamReader:
+    """Native tealet stream reader with synchronous methods.
+
+    Implements ``ReadStream``.
+    """
+
     _COMPACT_PREFIX = 4096
 
     def __init__(self, *, recv_buffer: RecvIterBuffer, limit: int = DEFAULT_LIMIT) -> None:
@@ -42,6 +47,10 @@ class ReaderCore:
     @property
     def at_eof(self) -> bool:
         return self._eof and not self._buffer_available()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
 
     def close(self) -> None:
         self._recv_buffer.close()
@@ -166,70 +175,22 @@ class ReaderCore:
                 return self._take_bytes(self._buffer_available())
 
 
-class StreamReader:
-    """Native tealet stream reader with synchronous methods.
+class AsyncStreamReader(StreamReader):
+    """Asyncio-shaped stream reader.
 
-    Implements ``ReadStream``.
+    Same read path as ``StreamReader``. ``read``, ``readinto``,
+    ``readexactly``, and ``readline`` are coroutines around those calls.
+    Not a ``ReadStream``: the coroutine signatures are the asyncio shape.
     """
 
-    def __init__(
-        self,
-        *,
-        limit: int = DEFAULT_LIMIT,
-        recv_buffer: RecvIterBuffer,
-    ) -> None:
-        self._core = ReaderCore(recv_buffer=recv_buffer, limit=limit)
+    async def read(self, n: int = -1) -> bytes:  # ty: ignore[incompatible-method-override]
+        return StreamReader.read(self, n)
 
-    @property
-    def at_eof(self) -> bool:
-        return self._core.at_eof
+    async def readinto(self, b: Any) -> int:  # ty: ignore[incompatible-method-override]
+        return StreamReader.readinto(self, b)
 
-    @property
-    def limit(self) -> int:
-        return self._core._limit
+    async def readexactly(self, n: int) -> bytes:  # ty: ignore[incompatible-method-override]
+        return StreamReader.readexactly(self, n)
 
-    def close(self) -> None:
-        self._core.close()
-
-    def read(self, n: int = -1) -> bytes:
-        return self._core.read(n)
-
-    def readinto(self, b: Any) -> int:
-        return self._core.readinto(b)
-
-    def readexactly(self, n: int) -> bytes:
-        return self._core.readexactly(n)
-
-    def readline(self) -> bytes:
-        return self._core.readline()
-
-
-class AsyncStreamReader:
-    """Asyncio-shaped stream reader backed by tealet-blocking socket I/O."""
-
-    def __init__(
-        self,
-        *,
-        limit: int = DEFAULT_LIMIT,
-        recv_buffer: RecvIterBuffer,
-    ) -> None:
-        self._core = ReaderCore(recv_buffer=recv_buffer, limit=limit)
-
-    @property
-    def at_eof(self) -> bool:
-        return self._core.at_eof
-
-    def close(self) -> None:
-        self._core.close()
-
-    async def read(self, n: int = -1) -> bytes:
-        return self._core.read(n)
-
-    async def readinto(self, b: Any) -> int:
-        return self._core.readinto(b)
-
-    async def readexactly(self, n: int) -> bytes:
-        return self._core.readexactly(n)
-
-    async def readline(self) -> bytes:
-        return self._core.readline()
+    async def readline(self) -> bytes:  # ty: ignore[incompatible-method-override]
+        return StreamReader.readline(self)

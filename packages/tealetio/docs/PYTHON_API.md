@@ -1212,9 +1212,11 @@ on 3.10 (`except*` needs 3.11+).
 `tealetio.streams` provides tealet-native stream endpoints backed by blocking
 socket I/O through `scheduler.io` on proactor schedulers. `StreamReader` and
 `StreamWriter` are the
-default native types with synchronous methods. `AsyncStreamReader` and
-`AsyncStreamWriter` mirror the asyncio stream API shape (`async def read`,
-`drain`, and so on) so handlers written for asyncio-style web code can run under
+default native types with synchronous methods. `AsyncStreamReader` subclasses
+`StreamReader`, and `AsyncStreamWriter` subclasses `StreamWriter`. The async
+methods (`read`, `readinto`, `readexactly`, `readline`, `drain`, `wait_closed`)
+are coroutines around those calls, so handlers written for asyncio-style web
+code can run under
 `run_coro()` or `scheduler.await_()` without creating asyncio futures for socket
 reads and writes.
 
