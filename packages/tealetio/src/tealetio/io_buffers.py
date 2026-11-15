@@ -375,7 +375,9 @@ class SendBuffer:
 
     A failed counted send subtracts the same length and stores the error, so
     a waiter does not stay parked. A raise from the submit call is not
-    stored. The ring marks a close parked behind that send abortive.
+    stored. A failed nowait ``send_all`` with ``skip_all`` marks the fd
+    abortive, so a close parked behind that tail resets the connection. A
+    failed counted send leaves that close graceful.
     """
 
     def __init__(

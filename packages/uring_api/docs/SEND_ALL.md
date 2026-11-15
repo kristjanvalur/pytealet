@@ -442,9 +442,11 @@ may publish. Do not set `DEFER_TASKRUN` for a worker that enters.
 
 ## What stays in tealetio
 
-`SendBuffer` still coalesces. `write()` only queues. `drain()`,
-`write_eof()`, and the `close()` tail each submit one counted `send_all`
-for the whole backlog.
+`SendBuffer` still coalesces. `write()` only queues. `drain()` submits one
+counted `send_all` for the whole backlog. `write_eof()` and the `close()`
+tail each submit one nowait `send_all`. Those tails are not counted. A
+failed `skip_all` drain marks the fd abortive. A failed counted send does
+not.
 
 `UringProactor` stream send, including `send_close_nowait`, is
 `construct_send_all`. Close parks on the conflict FIFO. `pending_count()`

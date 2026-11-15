@@ -2587,10 +2587,13 @@ class SelectorProactor(ProactorBase):
         if entry is None:
             return False
         # abortive counts as busy so the next submit is queued and poisoned
-        # instead of starting on the live fd.
-        if entry.writer is not None or entry.write_queue or entry.abortive:
+        # instead of starting on the live fd. the queue is a deque, so this
+        # is not one or-expression: that would return the deque.
+        if entry.writer is not None:
             return True
-        return False
+        if entry.write_queue:
+            return True
+        return entry.abortive
 
     def _enqueue_write(
         self,
