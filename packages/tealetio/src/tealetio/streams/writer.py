@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from ..io_buffers import SendBuffer
 from ..socket_helpers import socket
 from .reader import AsyncStreamReader, ReadStream, StreamReader
-from .util import run_coro, writer_extra_info
+from .util import writer_extra_info
 
 
 class WriteStream(Protocol):
@@ -223,25 +223,20 @@ def shutdown_stream_writer(
     *,
     best_effort: bool = False,
 ) -> None:
-    """Close a stream writer and wait until its close has completed.
+    """Close a stream writer. Does not park.
 
-    ``wait_closed()`` parks until the close completion. Counted sends, a
-    ``write_eof()`` tail, and its ``SHUT_WR`` are ahead of that close on
-    the socket. This does not abort when that wait is interrupted. The
-    caller may call ``abort()`` itself.
+    ``close()`` submits the tail and the close. The completion callback
+    keeps the buffer alive after this returns. A handler that needs that
+    completion calls ``wait_closed()`` itself.
 
     When ``best_effort`` is false (normal handler cleanup), transport errors
     propagate. When true (discarded accepts or failed handler spawn), an
-    ``Exception`` from shutdown is suppressed. ``KeyboardInterrupt`` and
+    ``Exception`` from ``close()`` is suppressed. ``KeyboardInterrupt`` and
     ``SystemExit`` propagate either way.
     """
 
     try:
         writer.close()
-        if isinstance(writer, AsyncStreamWriter):
-            run_coro(writer.wait_closed())
-        else:
-            writer.wait_closed()
     except OSError:
         pass
     except Exception:

@@ -62,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``shutdown_stream_writer`` calls ``close()`` and returns. It does not
+  call ``wait_closed()``. ``StreamServer`` handler cleanup, a discarded
+  accept, a failed spawn, and a failed handshake use that helper. A
+  handler that needs the close completion calls ``wait_closed()`` itself.
 - ``AsyncStreamReader`` subclasses ``StreamReader``. ``read``,
   ``readinto``, ``readexactly``, and ``readline`` are coroutines around
   the synchronous methods. ``ReaderCore`` is gone.
