@@ -1,7 +1,7 @@
 """Per-request phase timing for the connection-handler tealet.
 
 Covers wall time on the scheduler thread from handler entry (streams already
-open) through body work and ``wait_closed`` shutdown — not uring worker CQEs.
+open) through body work and the nowait close — not uring worker CQEs.
 
 Enable via server ``--profile``. Under load, set ``TEALETIO_HANDLER_PROFILE_SAMPLE``
 (default 64) to sample every Nth request after the first warmup skip and print
@@ -118,7 +118,6 @@ class _HandlerAggregate:
         "write_ms",
         "drain_out_ms",
         "close_ms",
-        "wait_closed_ms",
         "readline_wait_ms",
         "first_readline_ms",
         "later_readline_ms",
@@ -141,7 +140,6 @@ class _HandlerAggregate:
             "write_ms": phase_delta.get("write", 0.0),
             "drain_out_ms": phase_delta.get("drain_out", 0.0),
             "close_ms": phase_delta.get("close", 0.0),
-            "wait_closed_ms": phase_delta.get("wait_closed", 0.0),
             "readline_wait_ms": float(payload.get("readline_wait_ms", 0.0)),
             "first_readline_ms": float(payload.get("first_readline_ms", 0.0)),
             "later_readline_ms": float(payload.get("later_readline_ms", 0.0)),
