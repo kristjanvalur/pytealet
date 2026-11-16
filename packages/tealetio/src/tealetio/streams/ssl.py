@@ -531,6 +531,27 @@ class SSLStream:
         self._reader.close()
         self._writer.close()
 
+    def close_nowait(self) -> None:
+        """Best-effort close_notify, then a nowait close of the inner pair.
+
+        Does not park. The inner close has no completion.
+        """
+
+        if self._closing or self._closed:
+            return
+        self._closing = True
+        if not self._unwrapped:
+            try:
+                self._sslobj.unwrap()
+            except (ssl.SSLWantReadError, ssl.SSLSyscallError, ssl.SSLWantWriteError, ssl.SSLError):
+                pass
+            try:
+                self._flush_outgoing(nowait=True)
+            except OSError:
+                pass
+        self._reader.close()
+        self._writer.close_nowait()
+
     def abort(self) -> None:
         """Abort the inner send pipeline. Does not park.
 

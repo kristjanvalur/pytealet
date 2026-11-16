@@ -337,6 +337,9 @@ def open_recv_iter_buffer(
 # to ``bytearray``. Detached intact for ``sock_sendall_cb`` (no second materialise).
 _PendingSend: TypeAlias = bytes | bytearray
 
+# close_nowait accepted. Not an OpHandle: abort_queue has nothing to mark.
+_NOWAIT_CLOSE = object()
+
 
 class SendBuffer:
     """Outbound queue for one task. ``write()`` only appends.
@@ -365,13 +368,17 @@ class SendBuffer:
     ``send_all`` inside ``sock_send_close_cb``, and that length is not added
     to the in-flight count. The callback is the close completion, queued
     behind that send and behind ``SHUT_WR`` when ``write_eof()`` has run.
-    ``wait_closed()`` parks until the close callback has run and no counted
-    send is still in flight. It is then safe to leave the scheduler.
+    ``close_nowait()`` is the same tail through ``sock_send_close``: no
+    callback and no handle. ``wait_closed()`` parks until the close callback
+    has run and no counted send is still in flight. After ``close_nowait()``
+    the close is already done from the buffer's point of view, so that wait
+    is only the counted send. It is then safe to leave the scheduler.
 
-    ``abort()`` reuses that close handle, or submits the close and then
+    ``abort()`` reuses the ``close()`` handle, or submits that close and then
     asks the proactor to abort the queue the handle is on. An in-flight
     ``send_all`` is cancelled. The close still runs. ``abort()`` does not
-    park. A ``close()`` that raises is not an abort.
+    park. A ``close()`` that raises is not an abort. ``close_nowait()`` has
+    no handle, so ``abort()`` after it does not call ``abort_queue``.
 
     A failed counted send subtracts the same length and stores the error, so
     a waiter does not stay parked. A raise from the submit call is not
@@ -523,6 +530,29 @@ class SendBuffer:
             raise
         self._close_handle = handle
 
+    def close_nowait(self) -> None:
+        """Reject further writes and submit the tail with a nowait close.
+
+        Does not park. ``sock_send_close`` queues the unsent bytes and the
+        close with no callback and no handle. ``closed`` becomes true.
+        ``wait_closed()`` still waits for a counted send, then returns: the
+        close itself has no completion to wait for. A submit failure puts
+        the tail back and raises. It does not store the exception.
+        """
+
+        if self.closed:
+            return
+        chunk = self._take_pending()
+        data: _PendingSend = b"" if chunk is None else chunk
+        try:
+            self._io.sock_send_close(self._sock, data)
+        except BaseException:
+            if chunk is not None:
+                self._prepend_pending(chunk)
+            raise
+        self._close_handle = _NOWAIT_CLOSE
+        self._close_done = True
+
     def abort(self) -> None:
         """Abort the send pipeline. Does not park.
 
@@ -532,19 +562,23 @@ class SendBuffer:
         queued sends with a poisoned fd. The close still runs. A submit
         failure from ``close()`` propagates and does not abort. A handle
         that is no longer on a queue is a miss: an idle close may already
-        have finished, and that close was not abortive.
+        have finished, and that close was not abortive. After
+        ``close_nowait()`` there is no handle, and this does not call
+        ``abort_queue``.
         """
 
         if not self.closed:
             self.close()
         handle = self._close_handle
-        if handle is not None:
-            self._io.proactor.abort_queue(handle)
+        if handle is None or handle is _NOWAIT_CLOSE:
+            return
+        self._io.proactor.abort_queue(handle)
 
     def wait_closed(self) -> None:
         """Park until the close callback has run and no counted send remains.
 
-        Calls ``close()`` first.
+        Calls ``close()`` first. After ``close_nowait()`` the close has no
+        callback, so this only waits for a counted send.
         """
 
         self.close()

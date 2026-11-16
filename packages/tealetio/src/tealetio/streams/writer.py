@@ -38,6 +38,8 @@ class WriteStream(Protocol):
 
     def close(self) -> None: ...
 
+    def close_nowait(self) -> None: ...
+
     def is_closing(self) -> bool: ...
 
     def drain(self) -> None: ...
@@ -158,6 +160,17 @@ class StreamWriter:
             self._reader.close()
         self._send_buffer.close()
 
+    def close_nowait(self) -> None:
+        """Queue the final send and a nowait close. Does not park.
+
+        Also closes the paired reader. No close completion is delivered.
+        ``wait_closed()`` still waits for a counted ``drain`` send.
+        """
+
+        if self._reader is not None:
+            self._reader.close()
+        self._send_buffer.close_nowait()
+
     def wait_closed(self) -> None:
         """Park until the buffer's close has completed.
 
@@ -175,7 +188,9 @@ class StreamWriter:
         """Abort the send pipeline. Does not park.
 
         Submits the close when ``close()`` has not been accepted, then
-        aborts that queue, and closes the paired reader. The library does
+        aborts that queue, and closes the paired reader. After
+        ``close_nowait()`` there is no queue handle, so the abort does
+        not call ``abort_queue``. The library does
         not call this. A server that timed out in its own ``wait_closed()``
         may. The close still runs. A later ``wait_closed()`` raises the
         cancelled send.
@@ -186,7 +201,7 @@ class StreamWriter:
             self._reader.close()
 
     def is_closing(self) -> bool:
-        """True once the buffer has accepted ``close()``."""
+        """True once the buffer has accepted ``close()`` or ``close_nowait()``."""
 
         return self._send_buffer.closed
 
@@ -195,10 +210,10 @@ class AsyncStreamWriter(StreamWriter):
     """Asyncio-shaped stream writer.
 
     Same send and close path as ``StreamWriter``. ``drain`` and
-    ``wait_closed`` are coroutines around those calls. ``drain_nowait``
-    and ``abort`` stay synchronous, so the backlog can be handed to the
-    proactor without entering a coroutine. Not a ``WriteStream``: the
-    coroutine signatures are the asyncio shape.
+    ``wait_closed`` are coroutines around those calls. ``drain_nowait``,
+    ``close_nowait``, and ``abort`` stay synchronous, so the backlog can
+    be handed to the proactor without entering a coroutine. Not a
+    ``WriteStream``: the coroutine signatures are the asyncio shape.
     """
 
     def __init__(
@@ -225,18 +240,18 @@ def shutdown_stream_writer(
 ) -> None:
     """Close a stream writer. Does not park.
 
-    ``close()`` submits the tail and the close. The completion callback
-    keeps the buffer alive after this returns. A handler that needs that
-    completion calls ``wait_closed()`` itself.
+    ``close_nowait()`` submits the tail and the close with no callback.
+    A handler that needs the close completion calls ``close()`` and
+    ``wait_closed()`` itself.
 
     When ``best_effort`` is false (normal handler cleanup), transport errors
     propagate. When true (discarded accepts or failed handler spawn), an
-    ``Exception`` from ``close()`` is suppressed. ``KeyboardInterrupt`` and
-    ``SystemExit`` propagate either way.
+    ``Exception`` from ``close_nowait()`` is suppressed. ``KeyboardInterrupt``
+    and ``SystemExit`` propagate either way.
     """
 
     try:
-        writer.close()
+        writer.close_nowait()
     except OSError:
         pass
     except Exception:

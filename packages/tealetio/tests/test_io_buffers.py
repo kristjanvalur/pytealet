@@ -828,6 +828,100 @@ class TestSendBuffer:
             reader.close()
             writer.close()
 
+    def test_close_nowait_submits_without_a_callback(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            sent: list[bytes] = []
+            real_send_close = scheduler.io.sock_send_close
+            real_send_close_cb = scheduler.io.sock_send_close_cb
+
+            def staged_send_close(sock: socket.socket, data, **_kwargs: object) -> None:
+                del sock
+                sent.append(bytes(data))
+
+            def staged_send_close_cb(sock: socket.socket, data, callback) -> None:
+                del sock, data, callback
+                raise AssertionError("close_nowait used the callback close")
+
+            scheduler.io.sock_send_close = staged_send_close  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = staged_send_close_cb  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer.write(b"ab")
+            send_buffer.close_nowait()
+            assert sent == [b"ab"]
+            assert send_buffer.closed
+            assert send_buffer._close_done
+            assert send_buffer.connection_lost
+            send_buffer.close_nowait()
+            send_buffer.close()
+            assert sent == [b"ab"]
+            with pytest.raises(RuntimeError, match="SendBuffer is closed"):
+                send_buffer.write(b"c")
+        finally:
+            scheduler.io.sock_send_close = real_send_close  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = real_send_close_cb  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_close_nowait_submit_failure_restores_the_tail(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            real_send_close = scheduler.io.sock_send_close
+
+            def raising_send_close(sock: socket.socket, data, **_kwargs: object) -> None:
+                del sock, data
+                raise OSError("close submit failed")
+
+            scheduler.io.sock_send_close = raising_send_close  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+            send_buffer.write(b"ab")
+            with pytest.raises(OSError, match="close submit failed"):
+                send_buffer.close_nowait()
+            assert send_buffer._pending == b"ab"
+            assert send_buffer._send_error is None
+            assert not send_buffer._close_done
+            assert not send_buffer.closed
+        finally:
+            scheduler.io.sock_send_close = real_send_close  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
+    def test_close_nowait_waits_for_a_counted_send(self, scheduler: SyncProactorScheduler) -> None:
+        reader, writer = socket.socketpair()
+        try:
+            pending = _HeldCallback()
+            real_sendall = scheduler.io.sock_sendall_cb
+            real_send_close = scheduler.io.sock_send_close
+
+            def pending_sendall(sock: socket.socket, data, callback) -> None:
+                del sock, data
+                pending.arm(callback)
+
+            def staged_send_close(sock: socket.socket, data, **_kwargs: object) -> None:
+                del sock, data
+
+            scheduler.io.sock_sendall_cb = pending_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_send_close = staged_send_close  # type: ignore[method-assign]
+            send_buffer = SendBuffer(sock=writer, io=scheduler.io, scheduler=scheduler)
+
+            def exercise() -> None:
+                send_buffer.write(b"ab")
+                send_buffer.drain()
+                send_buffer.close_nowait()
+                assert send_buffer.closed
+                assert send_buffer._close_done
+                assert not send_buffer.connection_lost
+                pending.complete(2, None)
+                send_buffer.wait_closed()
+                assert send_buffer.connection_lost
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            scheduler.io.sock_sendall_cb = real_sendall  # type: ignore[method-assign]
+            scheduler.io.sock_send_close = real_send_close  # type: ignore[method-assign]
+            reader.close()
+            writer.close()
+
     def test_write_after_close_raises(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
         try:

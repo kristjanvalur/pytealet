@@ -529,6 +529,10 @@ Empty data is only the close, and `close_socket` may be repeated. A
 socket is closed. The tail is not added to the in-flight count.
 `wait_closed()` parks until the close callback has run and no counted
 `drain` send is still in flight.
+`SendBuffer.close_nowait` submits that tail with `sock_send_close`.
+There is no callback and no handle. `closed` becomes true.
+`wait_closed()` after it only waits for a counted `drain` send.
+`abort()` does not call `abort_queue`.
 `Proactor.abort_queue(handle)` marks the write pipeline that still holds
 `handle`. Uring forwards to `Ring.abort_queue`. Selector finds the write
 queue by that handle. Either way an in-flight `send_all` is cancelled,
@@ -1324,6 +1328,9 @@ and queues `SHUT_WR` behind it. It does not park, and it does not close
 the socket. `close()` submits any unsent tail
 with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
 does not park. That tail is not part of the in-flight count.
+`close_nowait()` submits the same tail with `sock_send_close`: no callback
+and no handle. `wait_closed()` after that only waits for a counted `drain`
+send.
 `abort()` is that close, then `abort_queue` on the close handle, so an
 in-flight counted send is cancelled and the close still runs. It does
 not park. `StreamWriter.abort()` also closes the paired reader.
@@ -1462,9 +1469,9 @@ repeated one-shot accepts (see the `accept_many` notes above).
 `start_server(...)` returns a `StreamServer`. ``close()`` cancels the accept-loop
 tealet synchronously; listening sockets are closed when that tealet exits.
 ``wait_closed()`` blocks until the accept-loop tealet and in-flight handler
-tealets finish. Handler cleanup calls ``writer.close()`` and returns. It does
-not call ``wait_closed()``. The close completion stays on the ring after the
-handler tealet exits. Use as a context manager for both. ``serve_forever()`` parks the
+tealets finish. Handler cleanup calls ``writer.close_nowait()`` and returns.
+That close has no callback and does not call ``wait_closed()``. Use as a
+context manager for both. ``serve_forever()`` parks the
 current tealet until ``close()`` is called (accept is already active); it does
 not install signal handlers — use ``tealetio.run()`` / ``Runner`` for shutdown
 signals.

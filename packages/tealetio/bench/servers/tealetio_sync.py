@@ -111,9 +111,8 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
             timer.mark("drain_out")
             writer.close()
             timer.mark("close")
-            # wait_closed parks until the close completion. Counted sends
-            # are ahead of that close. StreamServer also wait_closed() in
-            # finally, which returns once this one has.
+            # this path waits for the close completion. the wrk path uses
+            # close_nowait and the server finally does not wait.
             writer.wait_closed()
             timer.mark("wait_closed")
             timer.finish()
@@ -127,7 +126,7 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
         writer.drain()
         if diag_enabled():
             diag_event("bench_close_begin", fd=fd)
-        writer.close()
+        writer.close_nowait()
 
     return client_handler
 

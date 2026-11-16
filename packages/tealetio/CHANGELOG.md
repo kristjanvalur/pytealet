@@ -62,10 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- ``shutdown_stream_writer`` calls ``close()`` and returns. It does not
-  call ``wait_closed()``. ``StreamServer`` handler cleanup, a discarded
-  accept, a failed spawn, and a failed handshake use that helper. A
-  handler that needs the close completion calls ``wait_closed()`` itself.
+- ``shutdown_stream_writer`` calls ``close_nowait()`` and returns. It
+  does not call ``wait_closed()``. ``StreamServer`` handler cleanup, a
+  discarded accept, a failed spawn, and a failed handshake use that
+  helper. A handler that needs the close completion calls ``close()``
+  and ``wait_closed()`` itself.
+- ``SendBuffer.close_nowait`` and ``StreamWriter.close_nowait`` submit
+  the unsent tail with ``sock_send_close``. There is no close callback
+  and no close handle. ``closed`` becomes true. ``wait_closed`` after
+  that only waits for a counted ``drain`` send. ``abort`` after
+  ``close_nowait`` does not call ``abort_queue``.
 - ``AsyncStreamReader`` subclasses ``StreamReader``. ``read``,
   ``readinto``, ``readexactly``, and ``readline`` are coroutines around
   the synchronous methods. ``ReaderCore`` is gone.

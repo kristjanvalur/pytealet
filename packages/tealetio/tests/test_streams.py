@@ -832,6 +832,35 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
+    def test_stream_writer_close_nowait_sends_and_closes_without_waiting(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+            )
+            stream_writer.write(b"hello")
+
+            def finish_close() -> bytes:
+                stream_writer.close_nowait()
+                assert stream_writer.is_closing()
+                assert stream_writer._sock.fileno() == -1
+                stream_writer.abort()
+                stream_writer.close()
+                stream_writer.wait_closed()
+                data = scheduler.io.sock_recv(peer, 16).wait()
+                eof = scheduler.io.sock_recv(peer, 1).wait()
+                return data + eof
+
+            assert scheduler.run_until_complete(scheduler.spawn(finish_close)) == b"hello"
+        finally:
+            conn.close()
+            peer.close()
+
     def test_stream_writer_wait_closed_initiates_close(self, scheduler: SyncProactorScheduler) -> None:
         conn, peer = socket.socketpair()
         try:
@@ -2605,12 +2634,9 @@ class _ShutdownWriter:
     def __init__(self, exc: BaseException | None) -> None:
         self._exc = exc
 
-    def close(self) -> None:
+    def close_nowait(self) -> None:
         if self._exc is not None:
             raise self._exc
-
-    def wait_closed(self) -> None:
-        return None
 
 
 def test_best_effort_shutdown_suppresses_exception_and_propagates_interrupt() -> None:
