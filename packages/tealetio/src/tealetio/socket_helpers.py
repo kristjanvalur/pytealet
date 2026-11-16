@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 # stdlib socket, resolved once. other tealetio modules import this name.
 # the stand-in is only for user code that called patch().
 try:
-    socket = socket.real_socket  # ty: ignore[unresolved-attribute]
+    socket = socket.real_socket  # ty: ignore[missing-attribute]
 except AttributeError:
     pass
 

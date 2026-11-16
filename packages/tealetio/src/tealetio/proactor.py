@@ -2988,10 +2988,9 @@ class UringProactor(ProactorBase):
             uring_api.IORING_RECVSEND_POLL_FIRST if self._capabilities.get("IORING_RECVSEND_POLL_FIRST", False) else 0
         )
         if not self._capabilities.get("IORING_RECV_MULTISHOT", False):
-            # bound fallback is a valid instance override; ty types the class method (with self)
-            self.recv_many = self._recv_multishot_fallback  # ty: ignore[invalid-assignment]
+            self.recv_many = self._recv_multishot_fallback
         if not self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
-            self.accept_many = self._accept_multishot_fallback  # ty: ignore[invalid-assignment]
+            self.accept_many = self._accept_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by preparing another one-shot SQE after each CQE
         # (oneshot poll delivery arms the next leg under ``_multi_leg_lock``).
@@ -3874,9 +3873,7 @@ class UringProactor(ProactorBase):
             return super().stat_fdsize(fd, callback)
         return self._ring.prepare_statx_fdsize(fd, (_stat_fdsize_cqe, callback, (fd,)))
 
-    # instance may rebind recv_many to the bound fallback; ty then unions that
-    # with this def and rejects the override (extra self on the unbound form)
-    def recv_many(  # ty: ignore[invalid-method-override]
+    def recv_many(
         self,
         sock: socket.socket,
         callback: _RecvManyCallback,
@@ -4076,7 +4073,7 @@ def _default_proactor_factory() -> Proactor:
     """
 
     if uring_api.is_available():
-        return UringProactor()  # ty: ignore[invalid-return-type]
+        return UringProactor()  # ty: ignore[invalid-explicit-return]
     return ThreadedSelectorProactor()
 
 
