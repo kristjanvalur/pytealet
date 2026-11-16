@@ -102,21 +102,15 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
             # handler tealet is running; pre_handler_ms is spawn lag before this line
             timer.mark("handler_start", **extra)
         if timer is not None:
-            # body: read headers, write response, wait for send + socket teardown
+            # same submits as the wrk path: counted drain, then a nowait close
             drain_request_profile(reader, timer)
             timer.mark("drain")
             writer.write(RESPONSE)
             timer.mark("write")
             writer.drain()
             timer.mark("drain_out")
-            writer.close()
+            writer.close_nowait()
             timer.mark("close")
-            # Split shutdown: flush (parks) vs sock_close (forget, should be ~0).
-            # StreamServer also wait_closed() in finally (cheap once closed).
-            writer.flush()
-            timer.mark("flush")
-            writer.wait_closed()
-            timer.mark("sock_close")
             timer.finish()
             return
         if diag_enabled():
@@ -128,7 +122,7 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
         writer.drain()
         if diag_enabled():
             diag_event("bench_close_begin", fd=fd)
-        writer.close()
+        writer.close_nowait()
 
     return client_handler
 

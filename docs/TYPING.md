@@ -42,7 +42,7 @@ ty is gradual by default:
 
 - Missing parameter/return annotations are allowed.
 - Diagnostics fire when code **contradicts** an annotation or a solid inference
-  (`invalid-return-type`, `unresolved-attribute`, and similar).
+  (`invalid-explicit-return`, `missing-attribute`, and similar).
 
 We intentionally do **not** require a config that forces annotations on every
 def (unlike mypy `disallow_untyped_defs` under `--strict`). Policy is enforced

@@ -427,10 +427,9 @@ The result is how many bytes that call accepted. A short count is success.
 `scheduler.io.sock_sendall_cb(sock, data, callback)` is that submit with
 `callback(result, exception)` on the scheduler through `call_on_scheduler`:
 inline on a live turn, otherwise queued and the driver woken. The pair is
-the one `send_all` reports (the full length on success, `(None, exception)`
-on failure). `SendBuffer` completes its waited send leg with this callback.
-`drain`, `flush`, and `write_eof` use `sock_send_nowait` (`skip_success` +
-error callback).
+the one `send_all` reports: the submitted length, including when the send
+fails. `SendBuffer` uses this for `drain`. `write_eof` and the `close`
+tail are nowait sends, not counted legs.
 
 `scheduler.io.sock_shutdown(sock, how)` submits `proactor.shutdown` and returns
 an `IOWaiter`. `wait()` raises `OSError` from the kernel (`ENOTCONN` and
@@ -441,9 +440,13 @@ after an in-flight `send_all`.
 `scheduler.io.sock_shutdown_nowait(sock, how)` is `proactor.shutdown_nowait`
 (uring direct SQE, or a nowait completion parked on the same-fd conflict
 FIFO; selector queues behind an in-flight send). It returns `None`.
-`SendBuffer.write_eof` uses the nowait helper. `TealetSocket.shutdown` waits
-on `sock_shutdown`.
-`scheduler.io.sock_close_cb(sock, callback)` submits `Proactor.close_socket`.
+`SendBuffer.write_eof` uses `sock_shutdown_nowait` after a nowait
+`send_all` of the unsent tail. There is no shutdown completion to wait
+for. The socket stays open. A later `close` is queued behind that
+shutdown. `TealetSocket.shutdown` waits on `sock_shutdown`.
+`scheduler.io.sock_close_wait(sock)` is the same `close_socket` submit with
+an `IOWaiter`. `scheduler.io.sock_close_cb(sock, callback)` submits
+`Proactor.close_socket`.
 The fd is detached at submit. `callback(None, exception)` runs on the
 scheduler, after an in-flight send or shutdown on that socket.
 `scheduler.io.sock_close(sock) -> None` uses `Proactor.close_socket_nowait`:
@@ -486,7 +489,8 @@ callers stay on the same path.
 `Proactor.send_all(sock, data, callback, *, expect=IoExpect.READY)`
 drains the buffer and calls back `(nbytes, exception)`. `nbytes` is the full
 length of `data`. A short kernel send is re-armed inside the operation and
-is not a separate callback. Failures call back `(None, exception)`.
+is not a separate callback. Failures call back `(nbytes, exception)` with
+that same length.
 `IoExpect.READY`
 means the first attempt may complete now (uring omits `POLL_FIRST` on the
 first SQE). `IoExpect.BLOCK` means wait (uring sets `POLL_FIRST` when
@@ -500,8 +504,8 @@ only on failure. Uring uses `send_all` with `skip_success` when `callback`
 is set, and `skip_all` (errors to `nowait_error_handler`) when it is not.
 Selector arms `send_all` and ignores success. Follow nowait send with uring
 `shutdown_nowait` / `close_socket_nowait` on the same fd (conflict FIFO).
-`scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` drain/flush
-pass an error callback that makes the send error sticky and closes the socket.
+`scheduler.io.sock_send_nowait` is a pass-through. `SendBuffer` does not use
+it: `drain` submits a counted `sock_sendall_cb`.
 
 `Proactor.send_close_nowait(sock, data, *, expect=IoExpect.READY)` drains
 `data` then nowait-closes the socket. It returns `None` (no waitable).
@@ -510,8 +514,48 @@ FIFO; selector closes after send completion. Do not send again on that
 socket. Later failures go to the delivery exception handler.
 `scheduler.io.sock_send_close` is a pass-through, matching `sock_close`
 vs `close_socket_nowait`.
-`StreamWriter.wait_closed()` uses it for queued bytes (or closes when the
-in-flight send finishes) and does not park the handler tealet.
+`Proactor.send_close(sock, data, callback, *, expect=IoExpect.READY)` is
+the same drain-then-close order with a close callback. The send is
+nowait and has no callback. `callback(None, exception)` runs when the
+close completes. Empty `data` is only the close. Uring detaches the fd,
+then prepares `skip_all` `send_all` and the close together so the close
+parks on the conflict FIFO. Selector queues the close on the write FIFO
+behind the send.
+`scheduler.io.sock_send_close_cb(sock, data, callback)` delivers that
+close callback on the scheduler and returns the close handle.
+`SendBuffer.close` uses it for the unsent tail and keeps that handle.
+Empty data is only the close, and `close_socket` may be repeated. A
+`send_close` that still has data is the caller's to avoid once the
+socket is closed. The tail is not added to the in-flight count.
+`wait_closed()` parks until the close callback has run and no counted
+`drain` send is still in flight.
+`SendBuffer.close_nowait` submits that tail with `sock_send_close`.
+There is no callback and no handle. `closed` becomes true.
+`wait_closed()` after it only waits for a counted `drain` send.
+`abort()` does not call `abort_queue`.
+`Proactor.abort_queue(handle)` marks the write pipeline that still holds
+`handle`. Uring forwards to `Ring.abort_queue`. Selector finds the write
+queue by that handle. Either way an in-flight `send_all` is cancelled,
+`SO_LINGER` is set to {1, 0}, and later queued sends and shutdowns fail
+with `EBADF`. A queued close still runs. The call does not submit the
+close. A miss returns false.
+`SendBuffer.abort()` uses the close handle from `close()`, submitting
+that close first when it is not there yet, then calls `abort_queue`.
+It does not park. An idle close may already have finished before the
+abort, in which case the queue has nothing to mark.
+`StreamWriter.abort()` and `SSLStream.abort()` are that call for the
+writer a connection handler holds. `SSLStream.abort()` skips
+`close_notify`. Shutdown does not call `abort()`. A server that waits
+for the close with its own timeout may:
+
+```python
+writer.close()
+try:
+    with timeout(grace):
+        writer.wait_closed()
+except TimeoutError:
+    writer.abort()
+```
 
 `Proactor.recv` invokes `callback(RecvResult, exception)`. `RecvResult.data` is the
 payload; `RecvResult.more` is `IoMore` (portable `IORING_CQE_F_SOCK_NONEMPTY`).
@@ -1195,9 +1239,11 @@ on 3.10 (`except*` needs 3.11+).
 `tealetio.streams` provides tealet-native stream endpoints backed by blocking
 socket I/O through `scheduler.io` on proactor schedulers. `StreamReader` and
 `StreamWriter` are the
-default native types with synchronous methods. `AsyncStreamReader` and
-`AsyncStreamWriter` mirror the asyncio stream API shape (`async def read`,
-`drain`, and so on) so handlers written for asyncio-style web code can run under
+default native types with synchronous methods. `AsyncStreamReader` subclasses
+`StreamReader`, and `AsyncStreamWriter` subclasses `StreamWriter`. The async
+methods (`read`, `readinto`, `readexactly`, `readline`, `drain`, `wait_closed`)
+are coroutines around those calls, so handlers written for asyncio-style web
+code can run under
 `run_coro()` or `scheduler.await_()` without creating asyncio futures for socket
 reads and writes.
 
@@ -1274,15 +1320,29 @@ for asyncio-shaped `AsyncStream*` endpoints. `open_streams(sock, async_=False)`
 wraps an existing non-blocking connected socket. The `async_` flag only selects
 the default stream factory when `stream_factory` is omitted.
 Under the hood, `StreamWriter` queues outbound data through an internal
-`SendBuffer`. `write()` submits `sock_sendall_cb` once pending bytes reach
-`min_write`, and that completion chains the next chunk the same way.
-`write()` + `drain()` below high-water submits `sock_send_nowait` (uring
-`skip_success` `send_all`; send errors close the socket). `flush()` and
-`write_eof()` use that nowait submit too.
-`close()` rejects further writes; `wait_closed()` submits remaining bytes
-via `sock_send_close` (or closes when an in-flight send finishes) and does
-not park. Idle writers `sock_close`. Later send errors go to the delivery
-exception handler.
+`SendBuffer`. `write()` only appends. `drain()` submits one counted
+`sock_sendall_cb` for the backlog and parks only while the in-flight count
+is above the high water mark. `drain_nowait()` is that submit
+without the pause. `write_eof()` nowait-sends that backlog
+and queues `SHUT_WR` behind it. It does not park, and it does not close
+the socket. `close()` submits any unsent tail
+with `sock_send_close_cb` (nowait `send_all`, then a close callback) and
+does not park. That tail is not part of the in-flight count.
+`close_nowait()` submits the same tail with `sock_send_close`: no callback
+and no handle. `wait_closed()` after that only waits for a counted `drain`
+send.
+`abort()` is that close, then `abort_queue` on the close handle, so an
+in-flight counted send is cancelled and the close still runs. It does
+not park. `StreamWriter.abort()` also closes the paired reader.
+`SSLStream.abort()` skips `close_notify` and aborts the inner writer.
+Shutdown leaves that call to the application.
+`wait_closed()` parks until the close callback has run and no counted send
+is still in flight. A submit that raises is not stored. The caller
+has the exception, and a chunk the call did not accept goes back on the
+backlog. A failed counted send stores the error from its callback and
+subtracts the length `send_all` reported, so a waiter does not stay
+parked. The buffer does not close the socket on that send error.
+`close()` does.
 Default readers receive through `recv_many` via `RecvIterBuffer`.
 
 Pass `stream_factory=` to `open_streams()` or `open_connection(...)` to
@@ -1319,7 +1379,8 @@ thread; that opener must not park either.
 at the same time; `close()` is caller-synchronised. `SSLStream` muxes inner
 ciphertext I/O so both tealets can retry OpenSSL without issuing two inner
 reads or two inner drains. `WriteStream.start_tls(sslcontext, *, server_side=False, server_hostname=None)`
-upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): drain, wrap
+upgrades a live plaintext pair (SMTP STARTTLS, HTTP CONNECT): submit queued
+plaintext with `drain_nowait()` (no high-water pause), wrap
 that reader, handshake, return `(stream, stream)`. Rebind the names; the old
 pair is the ciphertext transport. `wrap_ssl` / `start_tls` / `SSLStream` are
 public for wrapping an existing pair without `ssl=` on connect.
@@ -1408,7 +1469,9 @@ repeated one-shot accepts (see the `accept_many` notes above).
 `start_server(...)` returns a `StreamServer`. ``close()`` cancels the accept-loop
 tealet synchronously; listening sockets are closed when that tealet exits.
 ``wait_closed()`` blocks until the accept-loop tealet and in-flight handler
-tealets finish. Use as a context manager for both. ``serve_forever()`` parks the
+tealets finish. Handler cleanup calls ``writer.close_nowait()`` and returns.
+That close has no callback and does not call ``wait_closed()``. Use as a
+context manager for both. ``serve_forever()`` parks the
 current tealet until ``close()`` is called (accept is already active); it does
 not install signal handlers — use ``tealetio.run()`` / ``Runner`` for shutdown
 signals.

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import socket
 import tempfile
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 from tealetio import CancelledError, Event, connect_tcp, set_scheduler
 from tealetio.tasks import DefaultTaskFactory
-from tealetio.io_manager import ProactorIOManager
 from tealetio.proactor import SyncProactorScheduler, UringProactor
 from tealetio.streams import (
     AsyncStreamReader,
@@ -114,7 +114,7 @@ class TestStreamsPoC:
             def exercise() -> bytes:
                 scheduler.spawn(client_side)
                 line = run_coro(echo_handler())
-                # drain() is nowait send_all; the SQE is flushed on the next wait
+                # the send SQE is flushed on the next wait
                 assert scheduler.io.sock_recv(client, 16).wait() == b"PING\n"
                 return line
 
@@ -182,7 +182,7 @@ class TestStreamsPoC:
             def exercise() -> bytes:
                 scheduler.spawn(deliver)
                 payload = handler()
-                # drain() is nowait send_all; the SQE is flushed on the next wait
+                # the send SQE is flushed on the next wait
                 assert scheduler.io.sock_recv(writer, 8).wait() == b"ack"
                 return payload
 
@@ -203,9 +203,7 @@ class TestStreamsPoC:
                 recv_buffer = _open_recv_buffer(io, sock, None)
                 send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = StreamWriter(
-                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
-                )
+                stream_writer = StreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -230,12 +228,12 @@ class TestStreamsPoC:
             factory = pooled_default_stream_factory()
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            pool_a = stream_a._core._recv_buffer._buffer_pool
-            pool_b = stream_b._core._recv_buffer._buffer_pool
+            pool_a = stream_a._recv_buffer._buffer_pool
+            pool_b = stream_b._recv_buffer._buffer_pool
             assert pool_a is not pool_b
             assert pool_a is not scheduler.io.shared_recv_buffer_pool()
-            assert stream_a._core._recv_buffer._owns_pool is True
-            assert stream_b._core._recv_buffer._owns_pool is True
+            assert stream_a._recv_buffer._owns_pool is True
+            assert stream_b._recv_buffer._owns_pool is True
         finally:
             reader_a.close()
             writer_a.close()
@@ -252,12 +250,12 @@ class TestStreamsPoC:
             factory = pooled_default_stream_factory(pool=shared)
             stream_a, _ = open_streams(reader_a, stream_factory=factory, scheduler=scheduler)
             stream_b, _ = open_streams(reader_b, stream_factory=factory, scheduler=scheduler)
-            assert stream_a._core._recv_buffer._buffer_pool is shared
-            assert stream_b._core._recv_buffer._buffer_pool is shared
-            assert stream_a._core._recv_buffer._owns_pool is False
+            assert stream_a._recv_buffer._buffer_pool is shared
+            assert stream_b._recv_buffer._buffer_pool is shared
+            assert stream_a._recv_buffer._owns_pool is False
             # first close must not dispose the shared pool for the peer stream
             stream_a.close()
-            assert stream_b._core._recv_buffer._buffer_pool is shared
+            assert stream_b._recv_buffer._buffer_pool is shared
             assert scheduler.io.acquire_recv_buffer_pool() is not shared
         finally:
             reader_a.close()
@@ -279,7 +277,7 @@ class TestStreamsPoC:
                 return default_stream_factory(io, sock, limit=limit, buffer_pool=pool)
 
             stream_reader, stream_writer = open_streams(reader, stream_factory=factory, scheduler=scheduler)
-            assert stream_reader._core._recv_buffer._owns_pool is False
+            assert stream_reader._recv_buffer._owns_pool is False
             stream_writer.close()
             stream_reader.close()
             # borrowed: stream close must not put this lease on the idle stack
@@ -300,9 +298,7 @@ class TestStreamsPoC:
                 recv_buffer = _open_recv_buffer(io, sock, None)
                 send_buffer = _open_send_buffer(io, sock)
                 stream_reader = TaggedAsyncStreamReader(limit=limit, recv_buffer=recv_buffer)
-                stream_writer = AsyncStreamWriter(
-                    send_buffer=send_buffer, sock=sock, io=cast(ProactorIOManager, io), reader=stream_reader
-                )
+                stream_writer = AsyncStreamWriter(send_buffer=send_buffer, sock=sock, reader=stream_reader)
                 return stream_reader, stream_writer
 
             stream_reader, _stream_writer = open_streams(
@@ -450,7 +446,7 @@ class TestStreamsPoC:
                     chunk = stream_reader.read(1)
                     assert len(chunk) == 1
                     out.extend(chunk)
-                assert stream_reader._core._buffer_available() == 0
+                assert stream_reader._buffer_available() == 0
                 return bytes(out)
 
             assert run_scheduler_task(scheduler, exercise) == payload
@@ -751,9 +747,7 @@ class TestStreamsPoC:
         finally:
             _client.close()
 
-    def test_start_server_opens_streams_from_the_accepted_socket(
-        self, scheduler: SyncProactorScheduler
-    ) -> None:
+    def test_start_server_opens_streams_from_the_accepted_socket(self, scheduler: SyncProactorScheduler) -> None:
         received: list[bytes] = []
         done = Event()
 
@@ -793,7 +787,7 @@ class TestStreamsPoC:
         try:
             reader.setblocking(False)
             stream_reader, _stream_writer = open_streams(reader, scheduler=scheduler)
-            assert isinstance(stream_reader._core._recv_buffer, RecvIterBuffer)
+            assert isinstance(stream_reader._recv_buffer, RecvIterBuffer)
         finally:
             reader.close()
             writer.close()
@@ -806,7 +800,6 @@ class TestStreamsPoC:
             reader.setblocking(False)
             _stream_reader, stream_writer = open_streams(reader, scheduler=scheduler)
             assert isinstance(stream_writer._send_buffer, SendBuffer)
-            assert stream_writer._send_buffer is stream_writer._core._send_buffer
             assert stream_writer.get_extra_info("socket") is stream_writer._sock
         finally:
             reader.close()
@@ -820,14 +813,13 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
             stream_writer.write(b"xy")
-            stream_writer.close()
-            assert stream_writer.is_closing()
-            assert stream_writer._sock.fileno() != -1
 
             def finish_close() -> bytes:
+                stream_writer.close()
+                assert stream_writer.is_closing()
+                assert stream_writer._send_buffer._close_handle is not None
                 stream_writer.wait_closed()
                 data = scheduler.io.sock_recv(peer, 2).wait()
                 while stream_writer._sock.fileno() != -1:
@@ -840,6 +832,35 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
+    def test_stream_writer_close_nowait_sends_and_closes_without_waiting(
+        self, scheduler: SyncProactorScheduler
+    ) -> None:
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            stream_writer = StreamWriter(
+                send_buffer=_open_send_buffer(scheduler.io, conn),
+                sock=conn,
+            )
+            stream_writer.write(b"hello")
+
+            def finish_close() -> bytes:
+                stream_writer.close_nowait()
+                assert stream_writer.is_closing()
+                assert stream_writer._sock.fileno() == -1
+                stream_writer.abort()
+                stream_writer.close()
+                stream_writer.wait_closed()
+                data = scheduler.io.sock_recv(peer, 16).wait()
+                eof = scheduler.io.sock_recv(peer, 1).wait()
+                return data + eof
+
+            assert scheduler.run_until_complete(scheduler.spawn(finish_close)) == b"hello"
+        finally:
+            conn.close()
+            peer.close()
+
     def test_stream_writer_wait_closed_initiates_close(self, scheduler: SyncProactorScheduler) -> None:
         conn, peer = socket.socketpair()
         try:
@@ -848,7 +869,6 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
             stream_writer.write(b"z")
             assert not stream_writer.is_closing()
@@ -867,35 +887,33 @@ class TestStreamsPoC:
             conn.close()
             peer.close()
 
-    def test_stream_writer_wait_closed_uses_send_close_for_queued_bytes(self, scheduler: SyncProactorScheduler) -> None:
+    def test_stream_writer_wait_closed_sends_queued_bytes(self, scheduler: SyncProactorScheduler) -> None:
         conn, peer = socket.socketpair()
         try:
             conn.setblocking(False)
             peer.setblocking(False)
             sent: list[bytes] = []
-            real = scheduler.io.sock_send_close
+            real = scheduler.io.sock_send_close_cb
 
-            def track_send_close(sock: socket.socket, data, *, expect=None) -> None:
-                del expect
+            def track_send_close(sock: socket.socket, data, callback):
                 sent.append(bytes(data))
-                return real(sock, data)
+                return real(sock, data, callback)
 
-            scheduler.io.sock_send_close = track_send_close  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = track_send_close  # type: ignore[method-assign]
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
 
             def exercise() -> None:
                 stream_writer.write(b"x")
                 stream_writer.wait_closed()
                 assert sent == [b"x"]
-                assert stream_writer._core._closed
+                assert stream_writer._send_buffer.connection_lost
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
         finally:
-            scheduler.io.sock_send_close = real  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = real  # type: ignore[method-assign]
             conn.close()
             peer.close()
 
@@ -913,23 +931,22 @@ class TestStreamsPoC:
             stream_writer = StreamWriter(
                 send_buffer=_open_send_buffer(scheduler.io, conn),
                 sock=conn,
-                io=scheduler.io,
             )
             shutdown_calls: list[tuple[socket.socket, int]] = []
-            close_calls: list[socket.socket] = []
-            real_shutdown = scheduler.io.sock_shutdown_nowait
-            real_close = scheduler.io.sock_close
+            close_calls: list[tuple[socket.socket, bytes]] = []
+            real_shutdown = scheduler.io.sock_shutdown_cb
+            real_close = scheduler.io.sock_send_close_cb
 
-            def track_shutdown(sock: socket.socket, how: int):
+            def track_shutdown(sock: socket.socket, how: int, callback) -> None:
                 shutdown_calls.append((sock, how))
-                return real_shutdown(sock, how)
+                real_shutdown(sock, how, callback)
 
-            def track_close(sock: socket.socket):
-                close_calls.append(sock)
-                return real_close(sock)
+            def track_close(sock: socket.socket, data, callback):
+                close_calls.append((sock, bytes(data)))
+                return real_close(sock, data, callback)
 
-            scheduler.io.sock_shutdown_nowait = track_shutdown  # type: ignore[method-assign]
-            scheduler.io.sock_close = track_close  # type: ignore[method-assign]
+            scheduler.io.sock_shutdown_cb = track_shutdown  # type: ignore[method-assign]
+            scheduler.io.sock_send_close_cb = track_close  # type: ignore[method-assign]
 
             def exercise() -> None:
                 stream_writer.close()
@@ -937,10 +954,42 @@ class TestStreamsPoC:
 
             scheduler.run_until_complete(scheduler.spawn(exercise))
             assert shutdown_calls == []
-            assert close_calls == [stream_writer._sock]
+            assert close_calls == [(stream_writer._sock, b"")]
         finally:
             conn.close()
             peer.close()
+
+    def test_writer_abort_after_close_wait_times_out(self, scheduler: SyncProactorScheduler) -> None:
+        """The application aborts after its own close wait times out."""
+
+        from tealetio.locks import TimeoutError, timeout
+
+        conn, peer = socket.socketpair()
+        try:
+            conn.setblocking(False)
+            peer.setblocking(False)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+            peer.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            _stream_reader, stream_writer = open_streams(conn, scheduler=scheduler)
+            payload = b"x" * (256 * 1024)
+
+            def exercise() -> None:
+                stream_writer.write(payload)
+                stream_writer.drain_nowait()
+                stream_writer.close()
+                with pytest.raises(TimeoutError):
+                    with timeout(0.05):
+                        stream_writer.wait_closed()
+                stream_writer.abort()
+                with pytest.raises(OSError) as exc_info:
+                    stream_writer.wait_closed()
+                assert exc_info.value.errno in (errno.ECANCELED, errno.EINTR)
+
+            scheduler.run_until_complete(scheduler.spawn(exercise))
+        finally:
+            peer.close()
+            if conn.fileno() != -1:
+                conn.close()
 
     def test_stream_reader_readline_fills_from_recv_iter_chunks(self, scheduler: SyncProactorScheduler) -> None:
         reader, writer = socket.socketpair()
@@ -2195,6 +2244,7 @@ class TestStreamsPoC:
             if sock is not None:
                 sock.close()
 
+
 class TestStreamsFakeUring:
     def test_async_stream_readexactly_with_fake_uring_ring(self, monkeypatch: pytest.MonkeyPatch):
         _patch_uring_capabilities(
@@ -2584,12 +2634,9 @@ class _ShutdownWriter:
     def __init__(self, exc: BaseException | None) -> None:
         self._exc = exc
 
-    def close(self) -> None:
+    def close_nowait(self) -> None:
         if self._exc is not None:
             raise self._exc
-
-    def wait_closed(self) -> None:
-        return None
 
 
 def test_best_effort_shutdown_suppresses_exception_and_propagates_interrupt() -> None:

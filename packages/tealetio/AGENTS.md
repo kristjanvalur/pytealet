@@ -103,11 +103,6 @@ For tealetio specifically:
   cast helpers.
 - Do not turn on mypy-style “all defs annotated” requirements; CI uses **ty**
   with gradual typing.
-- Assigning a bound method onto an instance attribute
-  (`self.recv_multishot = self._recv_multishot_fallback`) is valid Python. If
-  **ty** rejects it (`invalid-assignment` / `invalid-method-override`), fix
-  the types or ignore that diagnostic — do not “fix” the override by
-  renaming it away.
 
 ## Tests that cannot run
 

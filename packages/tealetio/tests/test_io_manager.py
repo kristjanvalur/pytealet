@@ -151,6 +151,7 @@ class _MockProactor:
         self.send_expects: list[object] = []
         self.send_nowait_calls: list[tuple[socket.socket, Any, object]] = []
         self.send_close_nowait_calls: list[tuple[socket.socket, Any, object]] = []
+        self.send_close_calls: list[tuple[socket.socket, Any, Any, object]] = []
         self.shutdown_nowait_calls: list[tuple[socket.socket, int]] = []
         self.create_socket_calls: list[tuple[Any, ...]] = []
         self.last_create_socket: socket.socket | None = None
@@ -308,6 +309,20 @@ class _MockProactor:
         self.send_close_nowait_calls.append((sock, data, expect))
         if sock.fileno() != -1:
             sock.close()
+
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: Any,
+        *,
+        expect: object = None,
+    ) -> None:
+        self.send_close_calls.append((sock, data, callback, expect))
+        callback(None, None)
+        if sock.fileno() != -1:
+            sock.close()
+        return "close-handle"
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         self.shutdown_nowait_calls.append((sock, how))
@@ -1707,6 +1722,28 @@ class TestProactorIOManagerDirect:
             assert len(proactor.send_close_nowait_calls) == 1
             assert proactor.send_close_nowait_calls[0][0] is sock
             assert proactor.send_close_nowait_calls[0][1] == b"hello"
+            assert sock.fileno() == -1
+        finally:
+            if sock.fileno() != -1:
+                sock.close()
+            peer.close()
+
+    def test_sock_send_close_cb_callbacks_on_the_close(self) -> None:
+        proactor = _MockProactor()
+        io = _manager(proactor)
+        sock, peer = socket.socketpair()
+        try:
+            seen: list[tuple[object, BaseException | None]] = []
+
+            def on_close(result: object, exc: BaseException | None) -> None:
+                seen.append((result, exc))
+
+            assert io.sock_send_close_cb(sock, b"hello", on_close) == "close-handle"
+            assert len(proactor.send_close_calls) == 1
+            assert proactor.send_close_calls[0][0] is sock
+            assert proactor.send_close_calls[0][1] == b"hello"
+            assert proactor.send_close_calls[0][3] is IoExpect.READY
+            assert seen == [(None, None)]
             assert sock.fileno() == -1
         finally:
             if sock.fileno() != -1:

@@ -196,6 +196,8 @@ class SocketIO(Protocol):
     ``sock_sendall`` and ``sock_shutdown`` are ``IOWaiter``.
     ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` deliver
     ``callback(result, exception)`` on the scheduler and return ``None``.
+    ``sock_send_close_cb`` fires on the close and returns that close handle.
+    ``sock_close_wait`` is the parking close.
     ``sock_send_nowait``, ``sock_shutdown_nowait``, and ``sock_close`` are
     nowait (``None``). Compose helpers (``sock_accept`` with preread,
     ``sock_connect`` with ``initial``, ``sock_fastopen``,
@@ -238,6 +240,13 @@ class SocketIO(Protocol):
         *,
         expect: IoExpect = IoExpect.READY,
     ) -> None: ...
+
+    def sock_send_close_cb(
+        self,
+        sock: socket.socket,
+        data: SocketSendBuffer,
+        callback: _IoCallback,
+    ) -> OpHandle: ...
 
     def sock_send_iter(
         self,
@@ -317,6 +326,8 @@ class SocketIO(Protocol):
 
     def sock_shutdown_nowait(self, sock: socket.socket, how: int) -> None: ...
 
+    def sock_close_wait(self, sock: socket.socket) -> IOWaiter[None]: ...
+
     def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None: ...
 
     def sock_close(self, sock: socket.socket) -> None: ...
@@ -332,9 +343,9 @@ class SocketIO(Protocol):
     def set_shared_recv_buffer_pool(self, pool: RecvBufferPool) -> None: ...
 
 
-# Stream-facing protocol slices live in ``streams.open`` / ``streams.writer`` as
-# ``StreamOpenIO`` and ``StreamWriterIO``. ``ProactorIOManager`` satisfies both
-# structurally without inheriting those protocols.
+# The stream-facing protocol slice lives in ``streams.open`` as
+# ``StreamOpenIO``. ``ProactorIOManager`` satisfies it structurally without
+# inheriting that protocol.
 
 
 @runtime_checkable
@@ -588,8 +599,8 @@ class ProactorIOManager:
     remains a blocking iterator over receive chunks. Always owned by a
     proactor scheduler.
 
-    Structurally implements ``StreamOpenIO`` and ``StreamWriterIO`` (defined in
-    ``streams.open`` / ``streams.writer``) for stream-pair construction.
+    Structurally implements ``StreamOpenIO`` (defined in ``streams.open``)
+    for stream-pair construction.
     """
 
     def __init__(
@@ -824,12 +835,11 @@ class ProactorIOManager:
     ) -> None:
         """Drain ``data``. ``callback(result, exception)`` runs on the scheduler.
 
-        Same submit as ``sock_sendall``, without a progress callback.
-        ``call_on_scheduler`` runs the callback inline on a live turn, and
-        otherwise queues it and wakes the driver. The callback receives the
-        ``send_all`` pair: the full length on success, and ``(None, exception)``
-        on failure. A later shutdown or close on this socket waits on the fd
-        FIFO. Callers that must cancel keep the ``OpHandle`` from
+        Same submit as ``sock_sendall``. ``call_on_scheduler`` runs the
+        callback inline on a live turn, and otherwise queues it and wakes
+        the driver. The callback receives the submitted length, including
+        when the send fails. A later shutdown or close on this socket waits
+        on the fd FIFO. Callers that must cancel keep the ``OpHandle`` from
         ``proactor.send_all``.
         """
 
@@ -874,6 +884,30 @@ class ProactorIOManager:
 
         self.proactor.send_close_nowait(sock, data, expect=expect)
 
+    def sock_send_close_cb(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _IoCallback,
+    ) -> OpHandle:
+        """Nowait ``send_all`` of ``data``, then close. The callback is the close.
+
+        ``callback(None, exception)`` runs on the scheduler when the close
+        completes, including when ``data`` is empty (close only). The send
+        has no callback and is not a counted leg. The socket FIFO runs the
+        close after that send and after any earlier send or shutdown.
+        Returns the close handle. Empty data is ``close_socket``, which may
+        be repeated. A call with data is the caller's to avoid once the
+        socket is closed.
+        """
+
+        return self.proactor.send_close(
+            sock,
+            data,
+            self._callback_on_scheduler(callback),
+            expect=IoExpect.READY,
+        )
+
     def _open_send_buffer(self, sock: socket.socket) -> SendBuffer:
         return open_send_buffer(sock, io=self, scheduler=self._scheduler)
 
@@ -915,12 +949,23 @@ class ProactorIOManager:
 
         self.proactor.shutdown_nowait(sock, how)
 
+    def sock_close_wait(self, sock: socket.socket) -> IOWaiter[None]:
+        """Submit ``close`` and return a waiter. The completion means ``close`` has finished.
+
+        Parks on the same-fd conflict FIFO behind an in-flight send or shutdown.
+        ``sock_close`` remains the nowait submit.
+        """
+
+        waiter: IOWaiter[None] = IOWaiter(self)
+        return waiter.bind(self.proactor.close_socket(sock, waiter.complete))
+
     def sock_close_cb(self, sock: socket.socket, callback: _IoCallback) -> None:
         """Submit ``close``. ``callback(None, exception)`` runs on the scheduler.
 
-        The fd is detached at submit. The socket FIFO runs this after an
-        in-flight send or shutdown. ``sock_close`` remains the nowait submit.
-        There is no cancel handle: the descriptor is already released.
+        Same submit as ``sock_close_wait``. The fd is detached at submit.
+        The socket FIFO runs this after an in-flight send or shutdown.
+        ``sock_close`` remains the nowait submit. There is no cancel handle:
+        the descriptor is already released.
         """
 
         self.proactor.close_socket(sock, self._callback_on_scheduler(callback))

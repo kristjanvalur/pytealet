@@ -386,14 +386,20 @@ def _recv_cqe(completion, user_cb, extra) -> None:
     user_cb(RecvResult(bytes(buf[:res]), _cqe_io_more(completion)), None)
 
 
-def _send_all_cqe(completion, user_cb, _extra) -> None:
-    """send_all shaper. ``user_data = (_send_all_cqe, user_cb, ())``."""
+def _send_all_cqe(completion, user_cb, extra) -> None:
+    """send_all shaper.
+
+    A counted ``send_all`` stores ``(nbytes,)`` and reports that submitted
+    length on failure. A nowait send stores ``()`` and still reports
+    ``(None, exception)``.
+    """
 
     if _cancel_or_remove_cqe(completion):
         return
+    accounted = extra[0] if extra else None
     res = completion.res
     if res < 0:
-        user_cb(None, _uring_cqe_oserror(res))
+        user_cb(accounted, _uring_cqe_oserror(res))
         return
     # result is the full offset across legs. res is that total clamped to INT_MAX.
     total = completion.result if completion.result is not None else res
@@ -579,6 +585,37 @@ def _close_raw_fd(fd: int) -> None:
         os.close(fd)
     except OSError:
         pass
+
+
+def _arm_abortive_fd(fd: int) -> None:
+    """Best-effort ``SO_LINGER`` {1, 0}. The dup is what gets closed.
+
+    ``socket(fileno=)`` would adopt ``fd``. The option lives on the open
+    file description, so the dup and the caller's fd share it. A non-socket
+    rejects the option. The close still runs.
+    """
+
+    if fd < 0:
+        return
+    try:
+        duped = os.dup(fd)
+    except OSError:
+        return
+    try:
+        held = socket.socket(fileno=duped)
+    except OSError:
+        _close_raw_fd(duped)
+        return
+    try:
+        held.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    except OSError:
+        pass
+    finally:
+        held.close()
+
+
+def _ebadf() -> OSError:
+    return OSError(errno.EBADF, os.strerror(errno.EBADF))
 
 
 def _enobufs_error() -> OSError:
@@ -899,7 +936,8 @@ class Proactor(Protocol):
         """Drain ``data``. ``callback(nbytes, exception)``.
 
         ``nbytes`` is the full length of ``data``. A short kernel send is
-        re-armed inside the operation. Failures call ``callback(None, exception)``.
+        re-armed inside the operation. Failures call ``callback(nbytes, exception)``
+        with that same length.
         """
         ...
 
@@ -931,6 +969,22 @@ class Proactor(Protocol):
         expect: IoExpect = IoExpect.READY,
     ) -> None:
         """Drain ``data`` then nowait-close ``sock``. No waitable."""
+        ...
+
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> OpHandle:
+        """Nowait ``send_all`` of ``data``, then close. ``callback(None, exception)`` is the close.
+
+        The send has no callback. Empty ``data`` is only the close.
+        ``close_socket`` may be repeated. ``send_close`` with data is the
+        caller's to avoid once the socket is closed.
+        """
         ...
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle: ...
@@ -1140,6 +1194,22 @@ class Proactor(Protocol):
         is submitted. On a ``recv_multishot`` target, further CQEs are not
         delivered. Accept, poll, and oneshot targets are unchanged. Selector
         accepts the flag and still terminalises locally.
+        """
+
+        ...
+
+    def abort_queue(self, handle: OpHandle) -> bool:
+        """Mark the write pipeline that still holds ``handle``.
+
+        ``handle`` is an existing operation, usually the close queued
+        behind a send. Uring forwards to ``Ring.abort_queue``: the pipeline
+        is marked, ``SO_LINGER`` {1, 0} is set, and an in-flight ``send_all``
+        is cancelled. Selector finds the write queue by that handle and does
+        the same. Later queued sends and shutdowns fail with ``EBADF``. A
+        queued close still runs and clears the mark. The ring does not submit
+        that close. A miss returns false and changes nothing. A completion
+        the ring rejects, or a failure to post the cancel, raises. Returns
+        true when a ``send_all`` cancel was issued.
         """
 
         ...
@@ -1402,6 +1472,9 @@ class ProactorBase:
     def cancel_nowait(self, handle: OpHandle, *, no_deliver_multi: bool = False) -> None:
         raise NotImplementedError
 
+    def abort_queue(self, handle: OpHandle) -> bool:
+        raise NotImplementedError
+
     def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
         raise NotImplementedError
 
@@ -1506,10 +1579,16 @@ class _FdSlot:
 
 @dataclass
 class _QueuedWrite:
-    """One write-side op waiting behind an in-flight send on the same fd."""
+    """One write-side op waiting behind an in-flight send on the same fd.
+
+    ``kind`` is ``"close"`` for a close, including a nowait close that has
+    no handle. An abortive queue runs a close and fails every other kind
+    with ``EBADF``.
+    """
 
     run: Callable[[], None]
     handle: _SelectorOpHandle | None = None
+    kind: str = ""
 
 
 @dataclass
@@ -1517,6 +1596,9 @@ class _FdEntry:
     reader: _FdSlot | None = None
     writer: _FdSlot | None = None
     write_queue: deque[_QueuedWrite] = field(default_factory=deque)
+    # set by abort_queue. stays until a close leaves the queue, so a later
+    # submit on this fd is poisoned the way an idle abortive ring slot is.
+    abortive: bool = False
 
     def empty(self) -> bool:
         return self.reader is None and self.writer is None and not self.write_queue
@@ -1592,10 +1674,18 @@ class SelectorProactor(ProactorBase):
         return self.create_recv_buffer_pool(buffer_size, buffer_count)
 
     def has_pending_operations(self) -> bool:
-        """Return True if IO is waiting for backend completion."""
+        """Return True if IO is waiting for backend completion.
+
+        An abortive mark with no reader, writer, or queued op is not a
+        completion. A later submit on that fd still fails with ``EBADF``
+        until a close runs.
+        """
 
         with self._lock:
-            return bool(self._fd_slots)
+            for entry in self._fd_slots.values():
+                if entry.reader is not None or entry.writer is not None or entry.write_queue:
+                    return True
+            return False
 
     def close(self) -> None:
         """Close selector and wakeup resources."""
@@ -1774,12 +1864,20 @@ class SelectorProactor(ProactorBase):
 
         ``nbytes`` is the full length of ``data``. ``expect`` is ignored on
         the selector path (the socket is already polled for ``EVENT_WRITE``).
-        Failures call ``callback(None, exception)``.
+        Failures call ``callback(nbytes, exception)`` with that same length.
         """
 
         del expect
-        operation = _spawn_operation("send_all", callback)
         view = memoryview(data)
+        accounted = len(view)
+
+        def report(nbytes: object, exception: BaseException | None) -> None:
+            if exception is not None:
+                callback(accounted, exception)
+                return
+            callback(nbytes, exception)
+
+        operation = _spawn_operation("send_all", report)
         offset = 0
 
         def attempt() -> int:
@@ -1889,6 +1987,28 @@ class SelectorProactor(ProactorBase):
         self.send_nowait(sock, data, on_error, expect=expect)
         self.close_socket_nowait(sock)
 
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> OpHandle:
+        """Nowait ``send_all``, then close. ``callback(None, exception)`` is the close.
+
+        The send completion stays internal. The close is queued on the write
+        FIFO behind that send. Empty ``data`` is only ``close_socket``.
+        ``close_socket`` may be repeated. ``send_close`` with data is the
+        caller's to avoid once the socket is closed.
+        """
+
+        self._check_open()
+        if not data:
+            return self.close_socket(sock, callback)
+        self.send_nowait(sock, data, expect=expect)
+        return self.close_socket(sock, callback)
+
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
 
@@ -1919,24 +2039,43 @@ class SelectorProactor(ProactorBase):
     def shutdown(self, sock: socket.socket, how: int, callback: _OneshotCallback) -> OpHandle:
         """``shutdown(how)`` after any in-flight send on this fd."""
 
+        operation = _spawn_operation("shutdown", callback)
+
         def run() -> None:
+            if operation.done():
+                return
+            operation._done = True
+            operation._callback = None
             _call_sync_callback(callback, lambda: sock.shutdown(how), void=True)
 
-        self._run_or_enqueue_write(sock, run)
+        # the token stays on the queue so an abortive drain can fail it.
+        # callers still get None: shutdown was not a cancel handle.
+        self._run_or_enqueue_write(sock, run, operation)
         return None
 
     def shutdown_nowait(self, sock: socket.socket, how: int) -> None:
         """Nowait ``shutdown``; queued behind an in-flight send on this fd."""
 
+        def on_done(_result: object, exception: BaseException | None) -> None:
+            if exception is not None:
+                self._report_nowait_send_error(exception, sock, message="shutdown_nowait failed")
+
+        operation = _spawn_operation("shutdown", on_done)
+
         def run() -> None:
+            if operation.done():
+                return
             if sock.fileno() == -1:
+                _finish_selector_oneshot(operation)
                 return
             try:
                 sock.shutdown(how)
             except OSError as exc:
-                self._report_nowait_send_error(exc, sock, message="shutdown_nowait failed")
+                _finish_selector_oneshot(operation, exception=exc)
+                return
+            _finish_selector_oneshot(operation)
 
-        self._run_or_enqueue_write(sock, run)
+        self._run_or_enqueue_write(sock, run, operation)
 
     def close_socket_nowait(self, sock: socket.socket) -> None:
         """Nowait close; queued behind an in-flight send on this fd."""
@@ -1949,16 +2088,26 @@ class SelectorProactor(ProactorBase):
             except OSError:
                 pass
 
-        self._run_or_enqueue_write(sock, run)
+        self._run_or_enqueue_write(sock, run, kind="close")
 
     def close_socket(self, sock: socket.socket, callback: _OneshotCallback) -> OpHandle:
-        """Close ``sock`` after any in-flight send on this fd."""
+        """Close ``sock`` after any in-flight send on this fd.
+
+        The returned token is the queued close. It is done once that close
+        runs. Cancelling it drops a close that is still on the write FIFO.
+        """
+
+        operation = _spawn_operation("close", callback)
 
         def run() -> None:
+            if operation.done():
+                return
+            operation._done = True
+            operation._callback = None
             _call_sync_callback(callback, sock.close, void=True)
 
-        self._run_or_enqueue_write(sock, run)
-        return None
+        self._run_or_enqueue_write(sock, run, operation)
+        return operation
 
     def accept_many(
         self,
@@ -2342,6 +2491,36 @@ class SelectorProactor(ProactorBase):
         if reg_error is not None:
             raise reg_error
 
+    def abort_queue(self, handle: OpHandle) -> bool:
+        """Mark the write queue that holds ``handle`` and cancel its ``send_all``.
+
+        A miss returns false. A hit sets ``SO_LINGER`` {1, 0} before the
+        cancel. Later queued sends and shutdowns fail with ``EBADF``. A
+        queued close still runs and clears the mark. Returns true when that
+        ``send_all`` was cancelled.
+        """
+
+        with self._lock:
+            self._check_open()
+            found = self._write_entry_for_handle(handle)
+            if found is None:
+                return False
+            fd, entry = found
+            entry.abortive = True
+            _arm_abortive_fd(fd)
+            writer = entry.writer
+            if (
+                writer is None
+                or not isinstance(writer.handle, _SelectorOpHandle)
+                or writer.handle.kind != "send_all"
+                or writer.handle.done()
+            ):
+                return False
+            # re-enters ``_lock``. drain fails queued ops, and runs a close,
+            # before this send_all's callback.
+            self.cancel_nowait(writer.handle)
+            return True
+
     def set_operation_callback(self, handle: OpHandle, callback: Callable[..., object]) -> None:
         """Replace the callback on a live selector operation.
 
@@ -2405,22 +2584,39 @@ class SelectorProactor(ProactorBase):
 
     def _write_busy(self, fd: int) -> bool:
         entry = self._fd_slots.get(fd)
-        return entry is not None and (entry.writer is not None or bool(entry.write_queue))
+        if entry is None:
+            return False
+        # abortive counts as busy so the next submit is queued and poisoned
+        # instead of starting on the live fd. the queue is a deque, so this
+        # is not one or-expression: that would return the deque.
+        if entry.writer is not None:
+            return True
+        if entry.write_queue:
+            return True
+        return entry.abortive
 
     def _enqueue_write(
         self,
         fd: int,
         run: Callable[[], None],
         handle: _SelectorOpHandle | None = None,
+        *,
+        kind: str = "",
     ) -> None:
+        if not kind and handle is not None:
+            kind = handle.kind
         entry = self._fd_slots.setdefault(fd, _FdEntry())
-        entry.write_queue.append(_QueuedWrite(run=run, handle=handle))
+        entry.write_queue.append(_QueuedWrite(run=run, handle=handle, kind=kind))
+        if entry.abortive and entry.writer is None:
+            self._drain_write_queue(fd)
 
     def _run_or_enqueue_write(
         self,
         sock: socket.socket,
         run: Callable[[], None],
         handle: _SelectorOpHandle | None = None,
+        *,
+        kind: str = "",
     ) -> None:
         """Run ``run`` now, or after the in-flight write-side op on this fd."""
 
@@ -2431,9 +2627,30 @@ class SelectorProactor(ProactorBase):
         with self._lock:
             self._check_open()
             if self._write_busy(fd):
-                self._enqueue_write(fd, run, handle)
+                self._enqueue_write(fd, run, handle, kind=kind)
                 return
         run()
+
+    def _write_entry_for_handle(self, handle: OpHandle) -> tuple[int, _FdEntry] | None:
+        """The write queue that still holds ``handle``. Caller holds ``_lock``."""
+
+        if not isinstance(handle, _SelectorOpHandle):
+            return None
+        for fd, entry in self._fd_slots.items():
+            writer = entry.writer
+            if writer is not None and writer.handle is handle:
+                return fd, entry
+            for item in entry.write_queue:
+                if item.handle is handle:
+                    return fd, entry
+        return None
+
+    def _fail_queued_write(self, item: _QueuedWrite) -> None:
+        """Finish a queued op as a poisoned fd. Does not call ``item.run``."""
+
+        if item.handle is None:
+            return
+        _finish_selector_oneshot(item.handle, exception=_ebadf())
 
     def _drain_write_queue(self, fd: int) -> None:
         """Start queued write-side ops while the writer slot is free. Holds ``_lock``."""
@@ -2445,11 +2662,27 @@ class SelectorProactor(ProactorBase):
             item = entry.write_queue.popleft()
             if item.handle is not None and item.handle.done():
                 continue
+            if entry.abortive and item.kind != "close":
+                try:
+                    self._fail_queued_write(item)
+                except Exception:
+                    if item.handle is not None and not item.handle.done():
+                        _finish_selector_oneshot(item.handle, exception=_ebadf())
+                continue
+            if item.kind == "close":
+                # the close's own syscall keeps the linger option. the mark
+                # is only what poisons the ops in front of it.
+                entry.abortive = False
             try:
                 item.run()
             except Exception as exc:
                 if item.handle is not None and not item.handle.done():
                     _finish_selector_oneshot(item.handle, exception=exc)
+        # a close callback may have replaced this entry. drop only the one
+        # we drained, and keep an abortive mark for the next submit.
+        if self._fd_slots.get(fd) is entry and entry.empty() and not entry.abortive:
+            del self._fd_slots[fd]
+            self._update_selector_registration(fd)
 
     def _remove_handle(self, handle: _SelectorOpHandle | _DeliveryHandle) -> bool:
         for fd, entry in list(self._fd_slots.items()):
@@ -2477,7 +2710,7 @@ class SelectorProactor(ProactorBase):
                     if entry is None:
                         self._update_selector_registration(fd)
                         return True
-                if entry.empty():
+                if entry.empty() and not entry.abortive:
                     del self._fd_slots[fd]
                 self._update_selector_registration(fd)
                 return True
@@ -2755,10 +2988,9 @@ class UringProactor(ProactorBase):
             uring_api.IORING_RECVSEND_POLL_FIRST if self._capabilities.get("IORING_RECVSEND_POLL_FIRST", False) else 0
         )
         if not self._capabilities.get("IORING_RECV_MULTISHOT", False):
-            # bound fallback is a valid instance override; ty types the class method (with self)
-            self.recv_many = self._recv_multishot_fallback  # ty: ignore[invalid-assignment]
+            self.recv_many = self._recv_multishot_fallback
         if not self._capabilities.get("IORING_ACCEPT_MULTISHOT", False):
-            self.accept_many = self._accept_multishot_fallback  # ty: ignore[invalid-assignment]
+            self.accept_many = self._accept_multishot_fallback
         # continuous *many ops prefer kernel multishot when probed; otherwise they
         # emulate the stream by preparing another one-shot SQE after each CQE
         # (oneshot poll delivery arms the next leg under ``_multi_leg_lock``).
@@ -2913,6 +3145,18 @@ class UringProactor(ProactorBase):
             self._ring.prepare_cancel_nowait(handle, no_deliver_multi=True)
             return
         self._ring.prepare_cancel_nowait(handle)
+
+    def abort_queue(self, handle: OpHandle) -> bool:
+        """Mark the pipeline that still holds ``handle`` and cancel its ``send_all``.
+
+        Forwards to ``Ring.abort_queue``. ``handle`` is an existing
+        completion on that pipeline. The ring sets ``SO_LINGER`` {1, 0}
+        before the cancel and poisons later queued sends. It does not
+        submit the close. A miss returns false. A completion the ring
+        rejects, or a failure to post the cancel, raises.
+        """
+
+        return self._ring.abort_queue(handle)
 
     def stop_poll(self, handle: OpHandle, callback: _OneshotCallback) -> None:
         """Stop ``poll_many``. ``callback(None, exception)``.
@@ -3258,14 +3502,20 @@ class UringProactor(ProactorBase):
         CQEs). ``expect`` applies to the first SQE only. ``READY`` omits
         ``POLL_FIRST`` (try send now). ``BLOCK`` sets it when probed.
         Later legs always use ``POLL_FIRST`` in C when probed. Failures call
-        ``callback(None, exception)``.
+        ``callback(nbytes, exception)`` with ``nbytes`` the length of ``data``.
         """
 
         if not data:
             callback(0, None)
             return None
         flags = self._send_sqe_flags(expect=expect)
-        completion = self._ring.construct_send_all(sock.fileno(), data, flags, (_send_all_cqe, callback, ()))
+        accounted = len(memoryview(data))
+        completion = self._ring.construct_send_all(
+            sock.fileno(),
+            data,
+            flags,
+            (_send_all_cqe, callback, (accounted,)),
+        )
         self._ring.prepare(completion)
         return completion
 
@@ -3335,14 +3585,45 @@ class UringProactor(ProactorBase):
             return
         flags = self._send_sqe_flags(expect=expect)
         fd = sock.detach()
-        if fd == -1:
-            return
         # detach first so Python cannot close an in-flight fd. construct/prepare
         # failures after this are usage or internal errors; we do not recover the fd.
+        # an already detached socket is the caller's mistake. prepare of that
+        # fd is left as it is.
         completion = self._ring.construct_send_all(fd, data, flags)
         completion.skip_all = True
         close = self._ring.construct_close_nowait(fd)
         self._ring.prepare([completion, close])
+
+    def send_close(
+        self,
+        sock: socket.socket,
+        data: Any,
+        callback: _OneshotCallback,
+        *,
+        expect: IoExpect = IoExpect.READY,
+    ) -> OpHandle:
+        """Nowait ``send_all``, then close. ``callback(None, exception)`` is the close.
+
+        The send is ``skip_all``. The close completion is the only callback
+        and parks on the send-all conflict FIFO. Empty ``data`` is
+        ``close_socket``, which may be repeated. ``send_close`` with data
+        is the caller's to avoid once the socket is closed. The fd is
+        detached before either SQE is prepared.
+        """
+
+        if not data:
+            return self.close_socket(sock, callback)
+        flags = self._send_sqe_flags(expect=expect)
+        fd = sock.detach()
+        # detach first so Python cannot close an in-flight fd. construct/prepare
+        # failures after this are usage or internal errors; we do not recover the fd.
+        # an already detached socket is the caller's mistake. prepare of that
+        # fd is left as it is.
+        completion = self._ring.construct_send_all(fd, data, flags)
+        completion.skip_all = True
+        close = self._ring.construct_close(fd, (_void_result_cqe, callback, ()))
+        self._ring.prepare([completion, close])
+        return close
 
     def sendto(self, sock: socket.socket, data: Any, address: Any, callback: _OneshotCallback) -> OpHandle:
         """Arm a datagram send. ``callback(nbytes, exception)``."""
@@ -3592,9 +3873,7 @@ class UringProactor(ProactorBase):
             return super().stat_fdsize(fd, callback)
         return self._ring.prepare_statx_fdsize(fd, (_stat_fdsize_cqe, callback, (fd,)))
 
-    # instance may rebind recv_many to the bound fallback; ty then unions that
-    # with this def and rejects the override (extra self on the unbound form)
-    def recv_many(  # ty: ignore[invalid-method-override]
+    def recv_many(
         self,
         sock: socket.socket,
         callback: _RecvManyCallback,
@@ -3794,7 +4073,7 @@ def _default_proactor_factory() -> Proactor:
     """
 
     if uring_api.is_available():
-        return UringProactor()  # ty: ignore[invalid-return-type]
+        return UringProactor()  # ty: ignore[invalid-explicit-return]
     return ThreadedSelectorProactor()
 
 

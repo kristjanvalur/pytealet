@@ -782,6 +782,22 @@ class _FakeUringRing:
         completion._construct_flags = flags
         return completion
 
+    def construct_close(self, fd: int, user_data: object = None, *, abortive: bool = False) -> SimpleNamespace:
+        if self.closed:
+            raise RuntimeError("ring is closed")
+        completion = self._completion(
+            user_data,
+            kind=uring_api.COMPLETION_KIND_CLOSE,
+            res=0,
+            result=None,
+            prepared=False,
+        )
+        completion.skip_success = False
+        completion.skip_all = False
+        completion.abortive = abortive
+        completion._construct_fd = fd
+        return completion
+
     def construct_close_nowait(self, fd: int) -> SimpleNamespace:
         if self.closed:
             raise RuntimeError("ring is closed")
@@ -828,6 +844,17 @@ class _FakeUringRing:
             if kind == uring_api.COMPLETION_KIND_CLOSE and skip_all:
                 completion.prepared = True
                 self.prepare_close_nowait(completion._construct_fd)
+                continue
+            if kind == uring_api.COMPLETION_KIND_CLOSE:
+                completion.prepared = True
+                fd = completion._construct_fd
+                self.submitted_close.append((fd, completion.user_data))
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                self._note_armed()
+                self._queue_completion(completion)
                 continue
             completion.prepared = True
             self._note_armed()

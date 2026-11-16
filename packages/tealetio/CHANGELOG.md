@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- ``Proactor.abort_queue(handle)`` marks the write pipeline that still
+  holds ``handle`` and cancels an in-flight ``send_all`` on it.
+  ``UringProactor`` forwards to ``Ring.abort_queue``. ``SelectorProactor``
+  finds that write queue, sets ``SO_LINGER`` {1, 0}, cancels the current
+  ``send_all``, and fails later queued sends and shutdowns with ``EBADF``.
+  A queued close still runs. A miss returns false. ``SendBuffer.abort``
+  reuses the close handle, or submits the close and then aborts that
+  handle. It does not park. ``StreamWriter.abort`` and
+  ``SSLStream.abort`` do that for the writer a handler holds.
+  ``SSLStream.abort`` skips ``close_notify``. Shutdown does not call
+  ``abort``. A server that timed out in its own ``wait_closed`` may.
 - ``iowait_or_dispose(waiter, dispose_cb, *, attempts=3)`` waits on an
   ``IOWaitable`` and is optional. The first ``wait`` that returns is the
   result. A throw is followed by another ``wait``, ``attempts`` times.
@@ -22,9 +33,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``send_all``, ``shutdown``, and ``close_socket`` and run
   ``callback(result, exception)`` on the scheduler through
   ``call_on_scheduler``. The callback runs inline on a live turn, and is
-  queued with a driver wake otherwise. ``SendBuffer`` completes its waited
-  send leg with ``sock_sendall_cb``. ``sock_sendall``, ``sock_shutdown``,
-  and ``sock_close`` stay for callers that park or close without waiting.
+  queued with a driver wake otherwise. ``SendBuffer.drain`` submits
+  counted sends through ``sock_sendall_cb``. ``sock_close_wait``
+  is the parking close. ``sock_sendall``, ``sock_shutdown``, and
+  ``sock_close`` stay for callers that park or close without waiting.
+- ``drain_nowait()`` submits the write backlog and does not park.
+  ``drain()`` is that submit plus the high-water pause. ``start_tls``
+  calls ``drain_nowait()``, matching asyncio's drain inside ``start_tls``
+  without waiting for the watermark. Queued plaintext leaves the buffer
+  before the handshake. Bytes already in flight stay ahead of it on the
+  socket queue. ``AsyncStreamWriter`` inherits the synchronous method,
+  so the submit runs where ``drain`` is a coroutine.
+- ``sock_send_close_cb`` submits a nowait ``send_all`` and then a close.
+  ``callback(None, exception)`` runs on the scheduler when the close
+  completes, and the call returns that close handle. Empty data is the
+  close alone, and that close may be repeated. A call that still has
+  data is the caller's to avoid once the socket is closed.
+  ``SendBuffer.close`` keeps the handle. The tail is not part of the
+  in-flight count.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
   TCP socket. ``SelectorProactor`` calls ``setsockopt`` after ``accept``.
@@ -36,6 +62,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``shutdown_stream_writer`` calls ``close_nowait()`` and returns. It
+  does not call ``wait_closed()``. ``StreamServer`` handler cleanup, a
+  discarded accept, a failed spawn, and a failed handshake use that
+  helper. A handler that needs the close completion calls ``close()``
+  and ``wait_closed()`` itself.
+- ``SendBuffer.close_nowait`` and ``StreamWriter.close_nowait`` submit
+  the unsent tail with ``sock_send_close``. There is no close callback
+  and no close handle. ``closed`` becomes true. ``wait_closed`` after
+  that only waits for a counted ``drain`` send. ``abort`` after
+  ``close_nowait`` does not call ``abort_queue``.
+- ``AsyncStreamReader`` subclasses ``StreamReader``. ``read``,
+  ``readinto``, ``readexactly``, and ``readline`` are coroutines around
+  the synchronous methods. ``ReaderCore`` is gone.
+- ``SendBuffer.write`` only appends. ``drain`` submits one counted
+  ``sock_sendall_cb``. The in-flight count is the sum of those lengths.
+  ``drain`` parks only while that count is above the high water mark. A
+  failed ``send_all`` reports the submitted length, and the buffer
+  subtracts it. ``write_eof`` nowait-sends the unsent tail and queues
+  ``SHUT_WR`` behind it. There is no shutdown completion. The socket
+  stays open. ``close`` submits any still-unsent tail with
+  ``sock_send_close_cb`` and does not park. ``wait_closed`` waits until
+  that close callback has run and no counted send is still in flight.
+  The buffer wakes with ``PulseEvent``.
+  A submit that raises is not stored. ``drain``, ``write_eof``, and
+  ``close`` restore a chunk the call did not accept and propagate the
+  exception. An error from a send or close callback is still stored, so
+  a parked ``drain`` or ``wait_closed`` raises it.
+  ``flush`` is removed from ``SendBuffer``, stream writers, and
+  ``SSLStream``.
+- ``StreamWriter.can_write_eof`` reports the half-close capability. It
+  stays true for a socket writer. ``SSLStream.can_write_eof`` stays false,
+  and ``SSLStream.write_eof`` raises ``NotImplementedError``.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.

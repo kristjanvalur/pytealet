@@ -32,7 +32,7 @@ async def _client_handler(reader: AsyncStreamReader, writer: AsyncStreamWriter) 
     await drain_request_async(reader)
     writer.write(RESPONSE)
     await writer.drain()
-    writer.close()
+    writer.close_nowait()
 
 
 def main() -> None:
