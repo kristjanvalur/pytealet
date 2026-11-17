@@ -6,6 +6,7 @@ import select
 import selectors
 import socket
 import threading
+import time
 import weakref
 
 import pytest
@@ -3881,6 +3882,157 @@ class TestSchedulerExamples:
                 poster.join(timeout=1.0)
             _stop_from_other_thread(s)
             t.join(timeout=1.0)
+
+    def test_call_on_scheduler_on_live_turn_does_not_break_wait(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.breaks = 0
+
+            def _break_wait(self) -> None:
+                self.breaks += 1
+                super()._break_wait()
+
+        s = Probe()
+        set_scheduler(s)
+        seen: list[object] = []
+
+        def worker() -> None:
+            before = s.breaks
+            s.call_on_scheduler(seen.append, "callback")
+            seen.append(s.breaks - before)
+
+        s.spawn(worker)
+        s.run()
+        assert seen == ["callback", 0]
+
+    def test_call_on_scheduler_breaks_blocked_driver_on_owner_thread(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.hook: object = None
+                self.woke = False
+                self.saw_flag: bool | None = None
+
+            def _wait_thread(self) -> None:
+                hook = self.hook
+                self.hook = None
+                if hook is not None:
+                    hook()
+                    self.woke = self._wakeup.is_set()
+                    if not self.woke:
+                        self._wakeup.set()
+                    self.stop()
+                super()._wait_thread()
+
+        s = Probe()
+        set_scheduler(s)
+
+        def callback() -> None:
+            s.saw_flag = s._in_driver_wait
+
+        def arm() -> None:
+            s.hook = lambda: s.call_on_scheduler(callback)
+
+        s.spawn(arm)
+        started = time.monotonic()
+        s.run_forever()
+        assert time.monotonic() - started < 1.0
+        assert s.saw_flag is True
+        assert s.woke is True
+
+    def test_pulse_inside_owner_callback_resumes_when_wait_returns(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.hook: object = None
+                self.callback_during_wait = False
+
+            def _wait_thread(self) -> None:
+                hook = self.hook
+                self.hook = None
+                if hook is not None:
+                    hook()
+                    self.callback_during_wait = order == ["park", "callback"]
+                    if not self._wakeup.is_set():
+                        self._wakeup.set()
+                        self.stop()
+                super()._wait_thread()
+
+        s = Probe()
+        set_scheduler(s)
+        pulse = locks_module.PulseEvent()
+        order: list[str] = []
+
+        def waiter() -> None:
+            order.append("park")
+            s.hook = lambda: s.call_on_scheduler(kick)
+            pulse.swait()
+            order.append("resumed")
+            s.stop()
+
+        def kick() -> None:
+            order.append("callback")
+            pulse.set()
+
+        s.spawn(waiter)
+        started = time.monotonic()
+        s.run_forever()
+        assert time.monotonic() - started < 1.0
+        assert order == ["park", "callback", "resumed"]
+        assert s.callback_during_wait is True
+
+    def test_arun_owner_callback_during_wait_runs_pulse_inline(self):
+        class Probe(AsyncScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.hook: object = None
+                self.callback_during_wait = False
+                self.order: list[str] = []
+
+            async def _driver_wait(self) -> None:
+                hook = self.hook
+                self.hook = None
+                if hook is not None:
+                    assert self._in_driver_wait
+                    hook()
+                    self.callback_during_wait = self.order == ["park", "callback"]
+                await super()._driver_wait()
+
+        async def orchestrate() -> None:
+            s = Probe()
+            set_scheduler(s)
+            pulse = locks_module.PulseEvent()
+
+            def waiter() -> None:
+                s.order.append("park")
+                s.hook = lambda: s.call_on_scheduler(kick)
+                pulse.swait()
+                s.order.append("resumed")
+                s.stop()
+
+            def kick() -> None:
+                s.order.append("callback")
+                pulse.set()
+
+            s.spawn(waiter)
+            await asyncio.wait_for(s.arun_forever(), timeout=1.0)
+            assert s.order == ["park", "callback", "resumed"]
+            assert s.callback_during_wait is True
+
+        asyncio.run(orchestrate())
+
+    def test_call_on_scheduler_before_run_queues_and_wakes_host(self):
+        s = BasicScheduler()
+        set_scheduler(s)
+        seen: list[str] = []
+        wakes: list[str] = []
+        s.set_driver_wakeup(lambda: wakes.append("host"))
+        s.call_on_scheduler(seen.append, "queued")
+        assert seen == []
+        assert wakes == ["host"]
+        s.run()
+        assert seen == ["queued"]
 
     def test_stop_breaks_sleep_in_run_forever_via_call_soon_threadsafe(self):
         s = _new_scheduler()

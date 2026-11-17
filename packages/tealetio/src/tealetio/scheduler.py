@@ -487,7 +487,14 @@ class BaseDrivingMixin:
             self._poll_io()
             await self._driver_yield()
             return
-        await self._driver_wait()
+        # blocked-driver signal for call_on_scheduler. only this wait, so a
+        # same-thread callback can break it. not the batch runner, not
+        # callback drain, and not the ring's owner break_wait policy.
+        self._in_driver_wait = True
+        try:
+            await self._driver_wait()
+        finally:
+            self._in_driver_wait = False
 
     def _before_arun(self) -> None:
         pass
@@ -1482,6 +1489,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._exception_handler: Callable[[dict[str, Any]], object] | None = None
         self._in_callback_drain = False
         self._callback_drain_task: tealet.tealet | None = None
+        # true only while _idle_or_poll is inside _driver_wait
+        self._in_driver_wait = False
         # host loop (Qt, asyncio) parked outside run(); None while run() owns the wait
         self._host_wakeup: Callable[[], None] | None = None
 
@@ -1872,23 +1881,27 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> None:
         """Run `callback(*args)` on the scheduler thread without copying context.
 
-        Worker completions have no tealet context to keep. On a live turn (a
-        task or callback drain) the callback runs on this stack. Otherwise it
-        is queued and the driver is woken. The owner thread is not enough:
-        hosted ``arun`` parked in asyncio still queues, so the callback does
-        not re-enter on the asyncio stack.
+        The owner thread runs the callback on this stack. Any other thread
+        queues it and wakes the driver. When the owner runs it while the
+        driver is blocked in ``_driver_wait``, ``_break_wait`` runs afterwards
+        so a ``PulseEvent.set`` inside the callback is serviced as soon as
+        that wait returns. The callback may queue runnable work. It must not
+        switch tealets from an asyncio stack or from inside that wait.
         """
 
-        if self._in_owner_live_turn():
+        if threading.get_ident() == self._owner_thread:
             self._run_callback(callback, args, None)
+            if self._in_driver_wait:
+                self._break_wait()
             return
         self._ready_callbacks.append((callback, args, None))
         self._wake_driver()
 
     def _in_owner_live_turn(self) -> bool:
         # Owner OS thread is not enough: hosted arun keeps _owner_thread set
-        # while the driver Task is parked in asyncio wait. call_on_scheduler
-        # runs inline only when a user tealet or callback drain is on the stack.
+        # while the driver Task is parked in asyncio wait. stop(), timers, and
+        # _make_runnable skip their wake only when a user tealet or callback
+        # drain is on the stack. call_on_scheduler does not use this.
         if self._owner_thread != threading.get_ident():
             return False
         if self._in_callback_drain:
@@ -2449,8 +2462,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Wake a parked backend wait. Safe from any thread.
 
         Callers use ``_wake_driver``, which also runs the host wakeup from
-        ``set_driver_wakeup``. Do not call this from an owner live turn (a
-        user tealet or callback drain): the driver is not parked.
+        ``set_driver_wakeup``. ``call_on_scheduler`` calls this directly when
+        the owner thread runs a callback during ``_in_driver_wait``. Do not
+        call this from an owner live turn (a user tealet or callback drain):
+        the driver is not parked.
         ``call_soon`` never wakes. ``_make_runnable`` and timer enqueue wake
         only when ``_in_owner_live_turn()`` is false, so a hosted loop parked
         on the owner thread still unblocks.

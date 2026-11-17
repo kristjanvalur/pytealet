@@ -426,9 +426,10 @@ The result is how many bytes that call accepted. A short count is success.
 `IOWaiter`. The manager does not call stdlib `send` itself.
 `scheduler.io.sock_sendall_cb(sock, data, callback)` is that submit with
 `callback(result, exception)` on the scheduler through `call_on_scheduler`:
-inline on a live turn, otherwise queued and the driver woken. The pair is
-the one `send_all` reports (the full length on success, `(None, exception)`
-on failure). `SendBuffer` completes its waited send leg with this callback.
+the owner thread runs it immediately, and any other thread queues it and
+wakes the driver. The pair is the one `send_all` reports (the full length
+on success, `(None, exception)` on failure). `SendBuffer` completes its
+waited send leg with this callback.
 `drain`, `flush`, and `write_eof` use `sock_send_nowait` (`skip_success` +
 error callback).
 
@@ -939,12 +940,16 @@ drain no-ops.
 `call_soon` queues for the next drain and copies context. It does not wake a
 parked driver. `call_soon_threadsafe` is that queue from any thread: it copies
 context and always wakes, and the callback still runs on a later drain.
-`call_on_scheduler` is the worker-thread hop. It does not copy context. On a
-live turn (a task or this drain) it runs on the current stack; otherwise it
-queues and wakes. A completion callback that needs a tealet uses
-`call_on_scheduler`, not `call_soon_threadsafe`. The owner thread alone is
-not a live turn: hosted `arun` parked in asyncio still queues, so the
-callback does not re-enter on the asyncio stack.
+`call_on_scheduler` is the worker-thread hop. It does not copy context. The
+owner thread runs the callback on the current stack, including while hosted
+`arun` is parked in asyncio and while a same-thread completion runs inside
+the driver wait. Any other thread queues the callback and wakes the driver.
+When the owner runs the callback while the driver is blocked in that wait,
+the wait is broken, so a `PulseEvent.set` in the callback is serviced when
+the wait returns. A completion callback that needs a tealet uses
+`call_on_scheduler`, not `call_soon_threadsafe`. The callback may queue
+runnable work. It must not switch tealets from an asyncio stack or from
+inside the driver wait.
 
 Callbacks are for **simple work**. They must not block waiting for another
 event, future, or remaining timer/threadsafe callback: the drain tealet is

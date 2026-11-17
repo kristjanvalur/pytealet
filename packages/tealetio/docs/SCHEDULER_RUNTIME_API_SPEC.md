@@ -821,8 +821,13 @@ Status: Implemented for current sync/async scheduler drivers.
   `call_soon` is not cancellable, does not return a handle, and does not
   `break_wait` (the caller is in a live turn). `call_soon_threadsafe` always
   `_break_wait`s and copies context. `call_on_scheduler` does not copy
-  context: on a live turn it runs on the current stack, otherwise it queues
-  and `_break_wait`s. `stop()`, `_make_runnable`, and timer enqueue
+  context. The owner thread runs it on the current stack. Any other thread
+  queues it and wakes the driver. When that owner callback runs while
+  `_in_driver_wait` is set (the flag around `_driver_wait` in
+  `_idle_or_poll`), it calls `_break_wait` afterwards so a `PulseEvent.set`
+  in the callback is serviced when the wait returns. That flag is not
+  `_runner`, not `_in_callback_drain`, and not the ring's
+  `skip_owner_break_wait`. `stop()`, `_make_runnable`, and timer enqueue
   `_break_wait` only when `_in_owner_live_turn()` is false: a user tealet or
   callback drain is already on the owner thread, but hosted `arun` parked in
   asyncio wait is not a live turn even though `_owner_thread` is still set.

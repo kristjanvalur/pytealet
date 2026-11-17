@@ -271,8 +271,9 @@ class Event:
                 for waiter in waiters:
                     scheduler._make_runnable(waiter)
 
-            # asyncio Future done-callbacks (await_) run while arun is parked.
-            # queue the wake so the driver is broken out of that wait.
+            # asyncio done-callbacks run on the owner thread while arun is
+            # parked. the wake runs on that stack and only queues the tealet.
+            # call_on_scheduler breaks the driver wait when it is blocked.
             scheduler.call_on_scheduler(wake)
         for waiter in async_waiters:
             if not waiter.done():

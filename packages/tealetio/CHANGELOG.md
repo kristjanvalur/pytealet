@@ -21,9 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` submit
   ``send_all``, ``shutdown``, and ``close_socket`` and run
   ``callback(result, exception)`` on the scheduler through
-  ``call_on_scheduler``. The callback runs inline on a live turn, and is
-  queued with a driver wake otherwise. ``SendBuffer`` completes its waited
-  send leg with ``sock_sendall_cb``. ``sock_sendall``, ``sock_shutdown``,
+  ``call_on_scheduler``. The owner thread runs that callback immediately.
+  Any other thread queues it and wakes the driver. ``SendBuffer`` completes
+  its waited send leg with ``sock_sendall_cb``. ``sock_sendall``,
+  ``sock_shutdown``,
   and ``sock_close`` stay for callers that park or close without waiting.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
@@ -36,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``call_on_scheduler`` runs the callback on the owner thread and queues it
+  from any other thread. It does not copy context. When the driver is
+  blocked in its wait, the owner-thread callback also breaks that wait, so
+  a ``PulseEvent.set`` inside the callback is serviced as soon as the wait
+  returns. Hosted ``arun`` runs the callback on the asyncio stack. That
+  callback may queue runnable work and must not switch tealets there.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.
@@ -363,10 +370,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selector proactors. Do not assign the returned handle again: the
   callback may already have cleared it.
 - ``call_on_scheduler(callback, *args)`` runs a worker callback on the
-  scheduler thread and does not copy context. On a live turn (a task or
-  callback drain) it runs on the current stack; otherwise it is queued and
-  the driver is woken. The owner thread alone is not a live turn: hosted
-  ``arun`` parked in asyncio still queues.
+  scheduler thread and does not copy context. The owner thread runs it on
+  the current stack. Any other thread queues it and wakes the driver. When
+  the driver is blocked, the owner-thread callback also breaks that wait.
 - ``Proactor.set_operation_callback(handle, callback)`` replaces the
   callback on a live operation, on both the uring and selector proactors.
   A result already in flight keeps the old callback; later ones use the
