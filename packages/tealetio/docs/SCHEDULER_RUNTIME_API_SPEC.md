@@ -819,7 +819,7 @@ Status: Implemented for current sync/async scheduler drivers.
   while they run, including `call_later(0)`, waits for
   the next drain.
   `call_soon` is not cancellable, does not return a handle, and does not
-  `break_wait` (the caller is in a live turn). `call_soon_threadsafe` always
+  `break_wait`. `call_soon_threadsafe` always
   `_break_wait`s and copies context. `call_on_scheduler` does not copy
   context. The owner thread runs it on the current stack. Any other thread
   queues it and wakes the driver. When that owner callback runs while
@@ -828,9 +828,10 @@ Status: Implemented for current sync/async scheduler drivers.
   in the callback is serviced when the wait returns. That flag is not
   `_runner`, not `_in_callback_drain`, and not the ring's
   `skip_owner_break_wait`. `stop()`, `_make_runnable`, and timer enqueue
-  `_break_wait` only when `_in_owner_live_turn()` is false: a user tealet or
-  callback drain is already on the owner thread, but hosted `arun` parked in
-  asyncio wait is not a live turn even though `_owner_thread` is still set.
+  call `_wake_driver` when `_in_driver_wait` is set, and when the caller is
+  not the owner thread. On the owner thread the driver reads its queues
+  before the next park. `_owner_thread` is `None` before `run` / `arun` and
+  between `turn()` slices, so those callers wake too.
   Nested `_run_ready_timers` calls no-op. Callbacks must
   not block-wait; they may eager-switch. Eager spawn, `Task.throw()` /
   `cancel()`, and `_park_current` of the drain tealet park the caller
@@ -871,8 +872,8 @@ Status: Implemented.
   `_break_wait` forwards to it (one method; safe from any thread). Production
   IO wakes through operation `add_done_callback` → `call_soon_threadsafe` →
   `_break_wait` → `wake_wait()`, not proactor-internal completion hooks.
-  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` do
-  only when the driver may be parked (`not _in_owner_live_turn()`).
+  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` wake
+  when `_in_driver_wait` is set, and when the caller is not the owner thread.
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter

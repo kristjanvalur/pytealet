@@ -3906,6 +3906,32 @@ class TestSchedulerExamples:
         s.run()
         assert seen == ["callback", 0]
 
+    def test_owner_task_spawn_timer_and_stop_do_not_break_wait(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.breaks = 0
+
+            def _break_wait(self) -> None:
+                self.breaks += 1
+                super()._break_wait()
+
+        s = Probe()
+        set_scheduler(s)
+        deltas: list[int] = []
+
+        def worker() -> None:
+            before = s.breaks
+            s.spawn(lambda: None)
+            s.call_later(0, lambda: None)
+            s.stop()
+            deltas.append(s.breaks - before)
+
+        s.spawn(worker)
+        s.run_forever()
+        assert deltas == [0]
+        assert s.is_running() is False
+
     def test_call_on_scheduler_breaks_blocked_driver_on_owner_thread(self):
         class Probe(BasicScheduler):
             def __init__(self) -> None:

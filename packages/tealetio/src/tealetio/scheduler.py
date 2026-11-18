@@ -487,9 +487,10 @@ class BaseDrivingMixin:
             self._poll_io()
             await self._driver_yield()
             return
-        # blocked-driver signal for call_on_scheduler. only this wait, so a
-        # same-thread callback can break it. not the batch runner, not
-        # callback drain, and not the ring's owner break_wait policy.
+        # blocked-driver signal. only this wait. the owner thread uses it
+        # to break the wait from call_on_scheduler, stop, timer enqueue,
+        # and _make_runnable. not the batch runner, not callback drain,
+        # and not the ring's owner break_wait policy.
         self._in_driver_wait = True
         try:
             await self._driver_wait()
@@ -1831,8 +1832,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Ask the currently running driver loop to stop."""
 
         self._stopping = True
-        if not self._in_owner_live_turn():
-            self._wake_driver()
+        # owner thread outside the blocking wait checks _stopping before it parks.
+        self._wake_unless_owner_driving()
 
     # -- Callback and timer scheduling --------------------------------
 
@@ -1897,18 +1898,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._ready_callbacks.append((callback, args, None))
         self._wake_driver()
 
-    def _in_owner_live_turn(self) -> bool:
-        # Owner OS thread is not enough: hosted arun keeps _owner_thread set
-        # while the driver Task is parked in asyncio wait. stop(), timers, and
-        # _make_runnable skip their wake only when a user tealet or callback
-        # drain is on the stack. call_on_scheduler does not use this.
-        if self._owner_thread != threading.get_ident():
-            return False
-        if self._in_callback_drain:
-            return True
-        current = _tasks.get_current()
-        return current is not None and current is not self._runner
-
     def call_later(
         self,
         delay: float,
@@ -1918,10 +1907,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> TimerHandle:
         """Schedule `callback(*args)` to run after `delay` seconds.
 
-        A timer armed while the driver is parked wakes it, including from
-        the owner thread while hosted ``arun`` is blocked in asyncio. A
-        timer armed from a live turn (a task or callback drain) does not:
-        the driver reads the heap before it parks again.
+        Arming a timer wakes the driver from another thread, and from the
+        owner thread while the driver is blocked in its wait. On the owner
+        thread the driver reads the heap before it parks again.
         """
 
         delay = max(delay, 0)
@@ -1947,10 +1935,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        # a live turn reads the heap before the next park. hosted arun can
-        # already be inside asyncio wait on this same thread.
-        if not self._in_owner_live_turn():
-            self._wake_driver()
+        self._wake_unless_owner_driving()
 
     def _drain_ready_callbacks(self) -> int:
         # Drain one queued entry at a time. If a callback raises (e.g.
@@ -2233,11 +2218,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runnable.add(t)
         self._bind_runnable(t)
         sched_note_make_runnable()
-        # skip the kick during a user tealet or callback drain: the driver
-        # is not parked. owner-thread alone is not enough — hosted arun keeps
-        # _owner_thread set while blocked in asyncio wait.
-        if not self._in_owner_live_turn():
-            self._wake_driver()
+        self._wake_unless_owner_driving()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
         # position 0: FIFO head, or immediate head when the queue has that lane.
@@ -2422,6 +2403,14 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 return self.time()
             return self._next_timer_deadline()
 
+    def _wake_unless_owner_driving(self) -> None:
+        # _in_driver_wait is the owner thread's parked state. the rest of
+        # that thread's driver loop reads the queues before the next park.
+        # any other caller wakes. _owner_thread is None before run/arun and
+        # between turn() slices, so those callers wake too.
+        if self._in_driver_wait or threading.get_ident() != self._owner_thread:
+            self._wake_driver()
+
     def _wake_driver(self) -> None:
         """Wake the backend wait, then the host callback if one is installed.
 
@@ -2463,12 +2452,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         Callers use ``_wake_driver``, which also runs the host wakeup from
         ``set_driver_wakeup``. ``call_on_scheduler`` calls this directly when
-        the owner thread runs a callback during ``_in_driver_wait``. Do not
-        call this from an owner live turn (a user tealet or callback drain):
-        the driver is not parked.
-        ``call_soon`` never wakes. ``_make_runnable`` and timer enqueue wake
-        only when ``_in_owner_live_turn()`` is false, so a hosted loop parked
-        on the owner thread still unblocks.
+        the owner thread runs a callback during ``_in_driver_wait``.
+        ``call_soon`` never wakes. ``stop``, ``_make_runnable``, and timer
+        enqueue call ``_wake_driver`` when ``_in_driver_wait`` is set, and
+        when the caller is not the owner thread. On the owner thread the
+        driver reads its queues before the next park. ``_owner_thread`` is
+        ``None`` before ``run`` / ``arun`` and between ``turn`` slices, so
+        those callers wake too and a host receives ``set_driver_wakeup``.
         """
 
 

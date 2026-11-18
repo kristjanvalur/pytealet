@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``stop()``, arming a timer, and queueing a runnable task wake the driver
+  from another thread, and from the owner thread while the driver is
+  blocked in its wait. On the owner thread the driver reads those queues
+  before it parks again. A host that drives with ``turn()`` receives
+  ``set_driver_wakeup`` from another thread.
 - ``call_on_scheduler`` runs the callback on the owner thread and queues it
   from any other thread. It does not copy context. When the driver is
   blocked in its wait, the owner-thread callback also breaks that wait, so
@@ -425,9 +430,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not cancellable; delayed work stays on the timer heap via ``call_later``
   / ``call_at``. Both enqueue with ``deque.append``. ``call_soon`` does not
   ``break_wait``. ``call_soon_threadsafe`` does. ``stop()``,
-  ``_make_runnable``, and timer enqueue do only when the owner thread is
-  not in a live turn (a user tealet or callback drain). Hosted ``arun``
-  parked on that same thread still gets the kick. There is one
+  ``_make_runnable``, and timer enqueue wake when the driver is blocked
+  in its wait, and when the caller is not the owner thread. There is one
   ``_break_wait`` (always safe from any thread).
 - ``RecvBufferPoolCache`` is a FIFO (``append`` / ``popleft``), not a
   stack. A still-armed pool is queued too and the ring stays registered.
