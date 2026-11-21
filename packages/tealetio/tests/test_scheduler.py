@@ -3097,11 +3097,12 @@ class TestCallbackDrainPhase:
             s.call_later(0, second)
 
         s.call_later(0, first)
-        s.turn()
-        assert order == ["first"]
+        with s.running():
+            s.turn()
+            assert order == ["first"]
 
-        s.turn()
-        assert order == ["first", "second"]
+            s.turn()
+            assert order == ["first", "second"]
 
     def test_timer_armed_by_opening_drain_waits_for_the_next_batch(self):
         s = BasicScheduler()
@@ -3120,13 +3121,14 @@ class TestCallbackDrainPhase:
 
         s.spawn(task)
         s.call_later(0, first)
-        s.turn()
-        # first runs in the opening drain and arms second. that handle is
-        # not in the list already popped, so it waits for the next batch.
-        assert order == ["first", "task"]
+        with s.running():
+            s.turn()
+            # first runs in the opening drain and arms second. that handle is
+            # not in the list already popped, so it waits for the next batch.
+            assert order == ["first", "task"]
 
-        s.turn()
-        assert order == ["first", "task", "second"]
+            s.turn()
+            assert order == ["first", "task", "second"]
 
     def test_nested_drain_does_not_start_while_outer_drain_is_suspended(self):
         s = BasicScheduler()
@@ -3151,8 +3153,9 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         extra_task = s.spawn(extra)
-        s.turn()
-        assert order == ["extra-start"]
+        with s.running():
+            s.turn()
+            assert order == ["extra-start"]
         s.reschedule(extra_task, position=0)
         s.call_soon(cb1)
         s.call_soon(cb2)
@@ -3284,11 +3287,12 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         target_task = s.spawn(target)
-        s.turn()
-        assert order == ["target-start"]
-        extra_task = s.spawn(extra)
-        s.turn()
-        assert order == ["target-start", "extra-start"]
+        with s.running():
+            s.turn()
+            assert order == ["target-start"]
+            extra_task = s.spawn(extra)
+            s.turn()
+            assert order == ["target-start", "extra-start"]
         s.reschedule(extra_task, position=0)
         s.call_soon(cb1)
         s.call_soon(cb2)
@@ -3334,11 +3338,12 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         target_task = s.spawn(target)
-        s.turn()
-        assert order == ["target-start"]
-        extra_task = s.spawn(extra)
-        s.turn()
-        assert order == ["target-start", "extra-start"]
+        with s.running():
+            s.turn()
+            assert order == ["target-start"]
+            extra_task = s.spawn(extra)
+            s.turn()
+            assert order == ["target-start", "extra-start"]
         s.reschedule(extra_task, position=0)
         s.call_soon(cb1)
         s.call_soon(cb2)
@@ -3445,8 +3450,9 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         extra_task = s.spawn(extra)
-        s.turn()
-        assert order == ["extra-start"]
+        with s.running():
+            s.turn()
+            assert order == ["extra-start"]
         s.spawn(other)
         s.call_soon(cb1)
         s.call_soon(cb2)
@@ -3481,8 +3487,9 @@ class TestCallbackDrainPhase:
             order.append("cb2")
 
         s.spawn(waiter)
-        s.turn()
-        assert order == ["waiter-start"]
+        with s.running():
+            s.turn()
+            assert order == ["waiter-start"]
         s.call_soon(cb1)
         s.call_soon(cb2)
         s.run()
@@ -3747,18 +3754,114 @@ class TestSchedulerExamples:
         asyncio.run(orchestrate())
         assert seen == [True]
 
-    def test_scheduler_is_running_set_during_turn_only(self):
+    def test_turn_requires_running(self):
+        s = _new_scheduler()
+        assert s.is_running() is False
+        with pytest.raises(RuntimeError, match="running"):
+            s.turn()
+        assert s.is_running() is False
+        assert s.in_turn() is False
+
+    def test_running_block_stays_active_between_turns(self):
         s = _new_scheduler()
         seen: list[bool] = []
 
         def check() -> None:
-            seen.append(s.is_running())
+            seen.append(s.in_turn())
+            seen.append(get_running_scheduler() is s)
 
         assert s.is_running() is False
-        s.spawn(check)
-        s.turn()
-        assert seen == [True]
+        with s.running():
+            assert s.is_running() is True
+            assert s.in_turn() is False
+            assert get_running_scheduler() is s
+            s.spawn(check)
+            assert s.in_turn() is False
+            s.turn()
+            assert s.is_running() is True
+            assert s.in_turn() is False
+            assert get_running_scheduler() is s
+        assert seen == [True, True]
         assert s.is_running() is False
+        with pytest.raises(RuntimeError, match="no running scheduler"):
+            get_running_scheduler()
+
+    def test_run_is_rejected_inside_running_block(self):
+        s = _new_scheduler()
+        with s.running():
+            with pytest.raises(RuntimeError, match="already running"):
+                s.run()
+        assert s.is_running() is False
+
+    def test_running_holds_the_run_driver_context(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
+        original_factory = _tealet.get_tealet_factory()
+        with s.running():
+            main = _tealet.main()
+            assert isinstance(main, PriorityTask)
+            assert main.get_scheduler() is s
+            assert main.priority == task_module.TEALET_PRI_INF
+            assert _tealet.get_tealet_factory() is not original_factory
+            assert s._owner_thread == threading.get_ident()
+            s.turn()
+            assert _tealet.main() is main
+            assert main.priority == task_module.TEALET_PRI_INF
+            assert s._owner_thread == threading.get_ident()
+            assert s.in_turn() is False
+        assert _tealet.get_tealet_factory() is original_factory
+        assert s._owner_thread is None
+
+    def test_eager_spawn_between_slices_returns_to_the_caller(self):
+        s = _new_scheduler()
+        order: list[str] = []
+
+        def child() -> None:
+            order.append("child")
+            s.yield_()
+            order.append("child-resume")
+
+        with s.running():
+            s.spawn(child, eager_start=True)
+            order.append("after-spawn")
+            assert order == ["child", "after-spawn"]
+            assert s.in_turn() is False
+            s.turn()
+        assert order == ["child", "after-spawn", "child-resume"]
+
+    def test_spawn_between_slices_posts_the_host_wakeup(self):
+        s = _new_scheduler()
+        wakes: list[str] = []
+        seen: list[str] = []
+        s.set_driver_wakeup(lambda: wakes.append("host"))
+        with s.running():
+            s.call_on_scheduler(seen.append, "inline")
+            assert seen == ["inline"]
+            assert wakes == []
+            s.spawn(lambda: None)
+            assert wakes == ["host"]
+            s.turn()
+            assert wakes == ["host"]
+
+    def test_turn_on_another_thread_between_slices_is_rejected(self):
+        s = _new_scheduler()
+        errors: list[BaseException] = []
+
+        def other() -> None:
+            set_scheduler(s)
+            try:
+                s.turn()
+            except RuntimeError as exc:
+                errors.append(exc)
+            finally:
+                set_scheduler(None)
+
+        with s.running():
+            worker = threading.Thread(target=other)
+            worker.start()
+            worker.join(timeout=1.0)
+            assert not worker.is_alive()
+        assert errors
+        assert "thread that entered running()" in str(errors[0])
 
     def test_ready_batch_limit_stops_one_shot_task_completion_chain(self):
         s = _new_scheduler()
@@ -4382,8 +4485,9 @@ class TestSchedulerExamples:
             seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
-        s.turn()
-        assert evt._waiters
+        with s.running():
+            s.turn()
+            assert evt._waiters
 
         s.call_at(9.0, evt.set)
         s.now = 11.0
@@ -4414,8 +4518,9 @@ class TestSchedulerExamples:
             seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
-        s.turn()
-        assert evt._waiters
+        with s.running():
+            s.turn()
+            assert evt._waiters
 
         s.call_at(9.0, evt.set)
         s.now = 11.0
@@ -4618,7 +4723,8 @@ class TestSchedulerExamples:
             order.append("caller-after")
 
         s.spawn(target_worker)
-        s.turn()
+        with s.running():
+            s.turn()
         s.spawn(extra)
         s.spawn(caller)
         s.run()
@@ -4661,7 +4767,8 @@ class TestSchedulerExamples:
             order.append("caller-after")
 
         s.spawn(target_worker)
-        s.turn()
+        with s.running():
+            s.turn()
         extra_task = s.spawn(extra)
         s.spawn(caller)
         s.run()
@@ -4698,7 +4805,8 @@ class TestSchedulerExamples:
             order.append("caller-after")
 
         s.spawn(target_worker)
-        s.turn()
+        with s.running():
+            s.turn()
         s.spawn(extra)
         s.spawn(caller)
         s.run()

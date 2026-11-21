@@ -37,17 +37,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``scheduler.running()`` holds the same driver context as ``run()``.
+  The main tealet uses the scheduler task factory at driver priority,
+  ``is_running()`` stays true, and this thread stays the owner, including
+  while the host waits between slices. ``turn()`` requires that context.
+  ``run()`` and ``arun()`` enter it themselves. ``in_turn()`` is true only
+  while ``turn()``, ``run()``, or ``arun()`` is on the stack. An eager
+  spawn between slices runs immediately and returns to the caller. The Qt
+  host holds ``running()`` for its ``exec`` loop.
 - ``stop()``, arming a timer, and queueing a runnable task wake the driver
-  from another thread, and from the owner thread while the driver is
-  blocked in its wait. On the owner thread the driver reads those queues
-  before it parks again. A host that drives with ``turn()`` receives
-  ``set_driver_wakeup`` from another thread.
+  from another thread, from the owner thread between ``turn()`` slices, and
+  from the owner thread while the driver is blocked in its wait. During a
+  slice the owner thread reads those queues before it parks again. A host
+  that drives with ``turn()`` receives ``set_driver_wakeup`` for those
+  wakes, including a spawn on the host thread between slices.
 - ``call_on_scheduler`` runs the callback on the owner thread and queues it
-  from any other thread. It does not copy context. When the driver is
-  blocked in its wait, the owner-thread callback also breaks that wait, so
-  a ``PulseEvent.set`` inside the callback is serviced as soon as the wait
-  returns. Hosted ``arun`` runs the callback on the asyncio stack. That
-  callback may queue runnable work and must not switch tealets there.
+  from any other thread. The owner is the thread inside ``running()``,
+  ``run()``, or ``arun()``, including the gaps between slices. It does not
+  copy context. When the driver is blocked in its wait, the owner-thread
+  callback also breaks that wait, so a ``PulseEvent.set`` inside the
+  callback is serviced as soon as the wait returns. Hosted ``arun`` runs
+  the callback on the asyncio stack. That callback may queue runnable work
+  and must not switch tealets there.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.

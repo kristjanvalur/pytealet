@@ -328,10 +328,11 @@ class TestQueueExamples:
             seen.append("second")
 
         first_task = s.spawn(first)
-        s.turn()
-        s.spawn(second)
-        s.turn()
-        assert len(q._putters) == 2
+        with s.running():
+            s.turn()
+            s.spawn(second)
+            s.turn()
+            assert len(q._putters) == 2
 
         def release_and_throw() -> None:
             assert q.get_nowait() == "held"
@@ -358,10 +359,11 @@ class TestQueueExamples:
             seen.append(q.sget())
 
         first_task = s.spawn(first)
-        s.turn()
-        s.spawn(second)
-        s.turn()
-        assert len(q._getters) == 2
+        with s.running():
+            s.turn()
+            s.spawn(second)
+            s.turn()
+            assert len(q._getters) == 2
 
         def offer_and_throw() -> None:
             q.put_nowait("item")

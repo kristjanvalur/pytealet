@@ -244,16 +244,18 @@ Semantics:
 - `Task.run()`, `Task.throw(...)`, and cancellation do not create
   this context themselves. The boundary is owned by scheduler/runner driving
   APIs and by explicit low-level callers.
-- Sync driving entry points (`run()`, `run_forever()`,
-  `run_until_complete(...)`, and `turn()`) and async driving entry points
-  (`arun(...)`, `arun_forever()`, and `arun_until_complete(...)`) enter
-  `main_context()` automatically. `Runner.run()`, `Runner.close()`,
-  `AsyncRunner.run()`, and `AsyncRunner.aclose()` also enter it while creating
-  and draining their main and shutdown tasks.
-- Priority-based schedulers also temporarily give the driving main tealet an
-  internal infinity priority while the scheduler is being driven. This keeps
-  real runnable work ahead of the driver and is an implementation detail rather
-  than a public priority band.
+- `running()` enters `main_context()` and holds driver priority and the
+  owner thread for the whole block. `run()`, `run_forever()`,
+  `run_until_complete(...)`, and the async entry points enter `running()`.
+  `turn()` requires that context and does not enter it again, so the main
+  tealet stays a scheduler task between slices. `Runner.run()`,
+  `Runner.close()`, `AsyncRunner.run()`, and `AsyncRunner.aclose()` also
+  enter `main_context()` while creating and draining their main and
+  shutdown tasks.
+- Priority-based schedulers give the driving main tealet an internal
+  infinity priority for the whole `running()` block, including the gaps
+  between `turn()` slices. This keeps real runnable work ahead of the
+  driver and is an implementation detail rather than a public priority band.
 
 Example:
 
@@ -789,8 +791,14 @@ IO-manager adapters.
 
 Status: Implemented.
 
-- `scheduler.is_running()` is defined as: a run call is currently active (not
-  merely "created" or "not closed").
+- `scheduler.is_running()` is true for a whole `run()` / `arun()` call and
+  for the whole `running()` block a host holds across many turns. `turn()`
+  requires `running()` and does not extend that flag by itself. It is not
+  merely "created" or "not closed". `in_turn()` is true only while
+  `turn()`, `run()`, or `arun()` is on the stack.
+  `get_running_scheduler()` follows `is_running()`. `running()` is the same
+  driver context as `run()`: main-tealet factory, driver priority, and the
+  owner thread.
 - Runner initialization rejects replacement while the currently bound scheduler
   is running.
 
@@ -828,10 +836,12 @@ Status: Implemented for current sync/async scheduler drivers.
   in the callback is serviced when the wait returns. That flag is not
   `_runner`, not `_in_callback_drain`, and not the ring's
   `skip_owner_break_wait`. `stop()`, `_make_runnable`, and timer enqueue
-  call `_wake_driver` when `_in_driver_wait` is set, and when the caller is
-  not the owner thread. On the owner thread the driver reads its queues
-  before the next park. `_owner_thread` is `None` before `run` / `arun` and
-  between `turn()` slices, so those callers wake too.
+  call `_wake_driver` from another thread, from the owner thread between
+  `turn()` slices, and from the owner thread while `_in_driver_wait` is set.
+  During a slice the owner thread reads its queues before the next park.
+  `_owner_thread` stays set for the whole `running()` block. It is `None`
+  outside `running()` / `run` / `arun`, so those callers wake too. A wake
+  between slices posts `set_driver_wakeup` on the owner thread as well.
   Nested `_run_ready_timers` calls no-op. Callbacks must
   not block-wait; they may eager-switch. Eager spawn, `Task.throw()` /
   `cancel()`, and `_park_current` of the drain tealet park the caller

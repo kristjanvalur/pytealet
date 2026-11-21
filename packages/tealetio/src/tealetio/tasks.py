@@ -621,6 +621,8 @@ def _start_task_eager(
 
 def _should_start_eager(scheduler: BaseScheduler, default: bool, override: bool | None) -> bool:
     eager_start = default if override is None else override
+    # running() keeps the main tealet as a task between slices, so the
+    # caller can park and switch now. the new task returns to that stack.
     return eager_start and scheduler.is_running()
 
 

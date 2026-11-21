@@ -699,6 +699,7 @@ class TestRunner:
 
     def test_run_uses_runner_creation_context(self):
         import contextvars
+
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
         marker.set("ambient")
         ctx = contextvars.copy_context()
@@ -765,7 +766,8 @@ class TestRunner:
                 seen.append("finally")
 
         task = scheduler.spawn(worker)
-        scheduler.turn()
+        with scheduler.running():
+            scheduler.turn()
 
         runner.close()
 
@@ -799,7 +801,8 @@ class TestRunner:
                 release_worker.set()
 
         scheduler.spawn(worker, eager_start=False)
-        scheduler.turn()
+        with scheduler.running():
+            scheduler.turn()
 
         runner.close()
 
@@ -840,7 +843,8 @@ class TestRunner:
                 raise
 
         closer_task = scheduler.spawn(closer)
-        scheduler.turn()
+        with scheduler.running():
+            scheduler.turn()
         scheduler.shutdown_tasks = [closer_task, victim_task]
 
         runner.close()

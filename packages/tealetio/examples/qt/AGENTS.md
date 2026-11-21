@@ -15,9 +15,13 @@ requires a threaded proactor. `tealetSlot` only spawns. The wait helpers
 park the tealet that the slot started. A dialog
 uses `show` and `finished`. `open` forces window modality, and setting
 application modality afterwards hides the box, so `wait_dialog` does not
-call it. A signal handler between turns cannot call `Event.set`; the wake
-goes through `call_on_scheduler`. `wait_call` is the only path that ends
-in `exec`, and it runs that call from a timer after `turn` has returned.
+call it. The host holds `scheduler.running()` for the whole `exec` loop.
+That is the same driver context as `run()`: `turn()` requires it, and
+`get_running_scheduler()` works between turns. A signal handler on this
+thread runs `call_on_scheduler` inline. The slice is not on the stack, so
+the wake still posts `set_driver_wakeup`. `wait_call` is
+the only path that ends in `exec`, and it runs that call from a timer
+after `turn` has returned.
 
 Tests need a Qt binding. `tests/conftest.py` puts this directory on
 `sys.path` and sets `QT_QPA_PLATFORM=offscreen` before Qt is imported.
