@@ -1,8 +1,9 @@
 """Modeless Qt dialog driven by tealet_qt.
 
 Inspired by qasync: Qt owns the thread, and a slot starts work that can wait.
-``application`` is the one tealet that builds the window. ``tealet_qt.run``
-is the host boilerplate around it: a scheduler and ``QApplication.exec``.
+``application`` is the one tealet that builds the window. ``QtScheduler``
+is the host: its ``run_until_complete`` parks in ``QApplication.exec``.
+A normal ``Runner`` drives that scheduler.
 ``Run job`` is a ``tealetSlot``. It returns immediately and the job runs as
 another tealet, parked in ``message_box`` rather than ``exec``, so the clock
 and the fetch keep running while a question is up.
@@ -33,9 +34,9 @@ try:
 except ImportError as exc:
     raise SystemExit("PySide6 is required for packages/tealetio/examples/qt: uv pip install PySide6") from exc
 
-from tealet_qt import QtHost, message_box, run, tealetSlot, wait_signal
+from tealet_qt import QtHost, QtScheduler, message_box, tealetSlot, wait_signal
 
-from tealetio import Event, get_scheduler, open_connection, sleep, spawn, timeout
+from tealetio import Event, Runner, get_scheduler, open_connection, sleep, spawn, timeout
 
 _FETCH_HOST = "jsonplaceholder.typicode.com"
 _FETCH_PATH = "/todos/1"
@@ -301,7 +302,7 @@ def _exercise(dialog: ClockDialog) -> None:
 def application(host: QtHost, *, self_test: bool = False) -> None:
     """The tealet that is this window.
 
-    ``run`` owns the Qt loop. This function builds the dialog and starts
+    ``QtScheduler`` owns the Qt loop. This function builds the dialog and starts
     the other tealets. It then parks until the window closes, so a question
     inside the job parks only that job tealet.
     """
@@ -326,7 +327,10 @@ def application(host: QtHost, *, self_test: bool = False) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     self_test = "--self-test" in args
-    return run(lambda host: application(host, self_test=self_test))
+    scheduler = QtScheduler(argv=args)
+    with Runner(scheduler_factory=lambda: scheduler) as runner:
+        runner.run(lambda: application(scheduler.host, self_test=self_test))
+    return scheduler.exit_code
 
 
 if __name__ == "__main__":

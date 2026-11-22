@@ -5,6 +5,7 @@ import sys
 import pytest
 import uring_api
 from tealetio import (
+    Runner,
     Scheduler,
     SelectorProactor,
     SyncUringProactor,
@@ -12,9 +13,10 @@ from tealetio import (
     UringProactor,
     set_scheduler,
     sleep,
+    spawn,
 )
 
-from tealet_qt import QtHost, message_box, run, tealetSlot, wait_call, wait_dialog, wait_signal
+from tealet_qt import QtHost, QtScheduler, message_box, run, tealetSlot, wait_call, wait_dialog, wait_signal
 from tealet_qt._qt import QApplication, QDialog, QMessageBox, QObject, Qt, QTimer, Signal
 from tealet_qt.host import threaded_scheduler
 
@@ -356,3 +358,24 @@ def test_run_propagates_the_main_tealet_exception(app):
 
     with pytest.raises(RuntimeError, match="boom"):
         run(body)
+
+
+def test_runner_drives_qt_scheduler_exec(app):
+    parked = []
+    scheduler = QtScheduler()
+
+    def body() -> str:
+        parked.append(spawn(lambda: sleep(30)))
+
+        class Probe(QObject):
+            ping = Signal(str)
+
+        probe = Probe()
+        QTimer.singleShot(0, lambda: probe.ping.emit("go"))
+        assert wait_signal(probe.ping) == ("go",)
+        return "done"
+
+    with Runner(scheduler_factory=lambda: scheduler) as runner:
+        assert runner.run(body) == "done"
+    assert scheduler.exit_code == 0
+    assert parked[0].cancelled()

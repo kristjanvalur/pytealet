@@ -956,15 +956,26 @@ leaving the callback unset keeps `run()` as it was. `yield_every` on
 `run()` / `arun()` is the batch cap when the caller wants shorter slices
 inside the blocking driver.
 
-`tealet_qt.run` in `packages/tealetio/examples/qt/` is that host. It spawns
-one tealet, `application`, and calls `exec`. It uses `Scheduler()`, whose
-proactor is threaded. `None` from `turn` means sleep until
-`set_driver_wakeup`. An inline proactor does not post that callback;
-`QtHost.start` raises for `SelectorProactor` and for a `UringProactor` with
-`inline_completions` set. Hosting those backends from `turn()` is future
-work, noted in `examples/qt/INLINE_HOST.md`.
-The local `tealet_qt` package beside the example supplies `QtHost`,
-`tealetSlot`, and `message_box`.
+`QtScheduler` in `packages/tealetio/examples/qt/` is that host, in the
+shape of `qasync.QEventLoop`. It is a `Scheduler`. `run_forever` parks
+in `QApplication.exec`. `run_until_complete` does the same and calls
+`app.exit` when the target is done. A normal `Runner` drives it:
+
+```python
+with Runner(scheduler_factory=QtScheduler) as runner:
+    runner.run(main)
+```
+
+`Runner.run` and `Runner.close` both call `run_until_complete`, so
+shutdown uses that same `exec`. An already-done target does not enter
+`exec`, because Qt drops an `exit` that arrived before `exec` starts.
+The proactor is the threaded default. `None` from `turn` means sleep
+until `set_driver_wakeup`. An inline proactor does not post that
+callback; `QtHost.start` raises for `SelectorProactor` and for a
+`UringProactor` with `inline_completions` set. Hosting those backends
+from `turn()` is future work, noted in `examples/qt/INLINE_HOST.md`.
+The local `tealet_qt` package beside the example supplies
+`QtScheduler`, `QtHost`, `tealetSlot`, and `message_box`.
 **Run job** is a `tealetSlot`, and the job tealet parks in `message_box`
 while a clock tealet and a fetch tealet keep running. The application
 tealet stays parked until the window closes.
