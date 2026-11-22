@@ -247,10 +247,14 @@ Semantics:
   APIs and by explicit low-level callers.
 - `running()` enters `main_context()` and holds driver priority and the
   owner thread for the whole block. `run()`, `run_forever()`,
-  `run_until_complete(...)`, and the async entry points enter `running()`.
-  `turn()` requires that context and does not enter it again, so the main
-  tealet stays a scheduler task between slices. Those drive methods also
-  enter `main_context()` themselves; re-entry keeps the same tealet.
+  `run_until_complete(...)`, and the async entry points enter `running()`
+  for the drive loop. `run_until_complete` spawns a callable before that
+  context, while `is_running()` is still false, so an eager factory queues
+  the entry. The loop then runs until that future is done. `Runner.run()`
+  spawns before it calls `run_until_complete`. `turn()` requires
+  `running()` and does not enter it again, so the main tealet stays a
+  scheduler task between slices. Those drive methods also enter
+  `main_context()` themselves; re-entry keeps the same tealet.
 - `Runner` and `AsyncRunner` are context managers. `run()` requires that
   block. Entering the runner holds one `main_context()` until the block
   exits. `close()` / `aclose()` cancel leftovers on that same main tealet,

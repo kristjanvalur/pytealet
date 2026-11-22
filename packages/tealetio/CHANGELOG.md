@@ -47,7 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The main tealet uses the scheduler task factory at driver priority,
   ``is_running()`` stays true, and this thread stays the owner, including
   while the host waits between slices. ``turn()`` requires that context.
-  ``run()`` and ``arun()`` enter it themselves. ``in_turn()`` is true only
+  ``run()``, ``run_forever()``, and ``arun()`` enter it themselves.
+  ``run_until_complete`` creates a callable entry first, while
+  ``is_running()`` is still false, then enters ``running()`` and loops
+  until that entry is done. An eager task factory therefore queues the
+  entry behind work that is already runnable. ``Runner.run()`` creates
+  its entry the same way before calling ``run_until_complete``.
+  ``in_turn()`` is true only
   while ``turn()``, ``run()``, or ``arun()`` is on the stack. An eager
   spawn between slices runs immediately and returns to the caller. The Qt
   host holds ``running()`` for its ``exec`` loop.

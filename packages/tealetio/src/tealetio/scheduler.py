@@ -201,7 +201,7 @@ class FifoRunnableQueue(RunnableQueueBase):
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
         # runnable set only holds scheduler Tasks
-        return tuple(self._items)  # ty: ignore[invalid-return-type]
+        return tuple(self._items)  # ty: ignore[invalid-explicit-return]
 
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         if task not in self._set:
@@ -271,7 +271,7 @@ class PriorityRunnableQueue(RunnableQueueBase):
         return (
             *self._prescheduled,
             *(entry[2] for entry in sorted(self._priority_items)),
-        )  # ty: ignore[invalid-return-type]
+        )  # ty: ignore[invalid-explicit-return]
 
     def _active_priority(self, task: tealet.tealet) -> Any:
         get_priority = getattr(task, "get_effective_priority", None)
@@ -576,7 +576,10 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.main_context(), self.running():
+        # create the entry before running(). is_running() becomes true only
+        # inside that context, so an eager factory queues the entry behind
+        # work that is already runnable. the loop below then drives it.
+        with self.main_context():
             if isinstance(future, _tasks.Future):
                 target: _tasks.Future[T] = future
                 if isinstance(target, _tasks.Task) and target.get_scheduler() is not self:
@@ -586,6 +589,7 @@ class BaseDrivingMixin:
             else:
                 raise TypeError("future must be a Future or callable")
 
+        with self.running():
             self._before_arun()
             self._stopping = False
             try:
@@ -1780,7 +1784,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             proto,
             flags,
         ).wait()
-        return info  # ty: ignore[invalid-return-type]
+        return info  # ty: ignore[invalid-explicit-return]
 
     def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
