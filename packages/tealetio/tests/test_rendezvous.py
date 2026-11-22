@@ -187,13 +187,14 @@ class TestRendezvous:
                 seen.append(str(exc))
 
         receiver_task = s.spawn(receiver)
-        s.turn()
-        assert rz._receiver is receiver_task
-        assert seen == []
-        s.spawn(sender)
-        s.turn()
-        assert seen == []
-        assert rz._handoff is None
+        with s.running():
+            s.turn()
+            assert rz._receiver is receiver_task
+            assert seen == []
+            s.spawn(sender)
+            s.turn()
+            assert seen == []
+            assert rz._handoff is None
 
         def cancel_receiver() -> None:
             receiver_task.cancel()

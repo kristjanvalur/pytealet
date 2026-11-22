@@ -39,10 +39,11 @@ class TestChannelExamples:
             ch.send(7)
             seen.append("sender:after")
 
-        s.spawn(sender)
-        s.turn()
+        with s.running():
+            s.spawn(sender)
+            s.turn()
 
-        assert ch.balance == 1
+            assert ch.balance == 1
 
         def receiver() -> None:
             seen.append(f"receiver:{ch.receive()}")
@@ -62,10 +63,11 @@ class TestChannelExamples:
             seen.append("receiver:before")
             seen.append(f"receiver:{ch.receive()}")
 
-        s.spawn(receiver)
-        s.turn()
+        with s.running():
+            s.spawn(receiver)
+            s.turn()
 
-        assert ch.balance == -1
+            assert ch.balance == -1
 
         def sender() -> None:
             ch.send(11)
@@ -135,9 +137,10 @@ class TestChannelExamples:
             seen.append("receiver:before")
             seen.append(f"receiver:{ch.receive()}")
 
-        s.spawn(receiver)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.spawn(receiver)
+            s.turn()
+            assert ch.balance == -1
 
         asyncio.run(asyncio.wait_for(ch.async_send(9), timeout=1.0))
         assert seen == ["receiver:before"]
@@ -155,9 +158,10 @@ class TestChannelExamples:
             ch.send(4)
             seen.append("sender:after")
 
-        s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.spawn(sender)
+            s.turn()
+            assert ch.balance == 1
 
         value = asyncio.run(asyncio.wait_for(ch.async_receive(), timeout=1.0))
         assert value == 4
@@ -227,8 +231,9 @@ class TestChannelExamples:
                 seen.append((type(exc).__name__, exc.operation_result))
 
         sender_task = s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.turn()
+            assert ch.balance == 1
 
         s.call_soon(lambda: got.append(ch.receive()))
         s.call_soon(sender_task.throw, RawTimeoutError())
@@ -250,8 +255,9 @@ class TestChannelExamples:
                 seen.append(exc.operation_result)
 
         sender_task = s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.turn()
+            assert ch.balance == 1
 
         s.call_soon(sender_task.throw, RuntimeError("interrupt"))
         s.run()
@@ -308,8 +314,9 @@ class TestChannelExamples:
                 seen.append(exc.operation_result)
 
         receiver_task = s.spawn(receiver)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.turn()
+            assert ch.balance == -1
 
         s.call_soon(ch.send, 42)
         s.call_soon(receiver_task.throw, RuntimeError("interrupt"))
@@ -326,9 +333,10 @@ class TestChannelExamples:
             assert isinstance(value, int)
             got.append(value)
 
-        s.spawn(receiver2)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.spawn(receiver2)
+            s.turn()
+            assert ch.balance == -1
 
         s.spawn(lambda: ch.send(99))
         s.run()
@@ -347,8 +355,9 @@ class TestChannelExamples:
                 seen.append(exc.operation_result)
 
         receiver_task = s.spawn(receiver)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.turn()
+            assert ch.balance == -1
 
         s.call_soon(ch.send_exception, payload)
         s.call_soon(receiver_task.throw, RuntimeError("interrupt"))
@@ -373,8 +382,9 @@ class TestChannelExamples:
                 seen.append((type(exc).__name__, exc.operation_result))
 
         receiver_task = s.spawn(receiver)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.turn()
+            assert ch.balance == -1
 
         s.call_soon(ch.send, None)
         s.call_soon(receiver_task.throw, RawTimeoutError())
@@ -405,8 +415,9 @@ class TestChannelExamples:
             send_or_requeue(ch, unsent, 5)
 
         task = s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.turn()
+            assert ch.balance == 1
 
         s.call_soon(task.throw, RuntimeError("interrupt"))
         s.run()
@@ -425,8 +436,9 @@ class TestChannelExamples:
             send_or_requeue(ch, unsent, 5)
 
         task = s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.turn()
+            assert ch.balance == 1
 
         s.call_soon(lambda: got.append(ch.receive()))
         s.call_soon(task.throw, RuntimeError("interrupt"))
@@ -557,8 +569,9 @@ class TestChannelTimeoutHandoff:
                 seen.append(_timeout_result(exc))
 
         sender_task = s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.turn()
+            assert ch.balance == 1
 
         s.call_soon(lambda: got.append(ch.receive()))
         s.run()
@@ -583,8 +596,9 @@ class TestChannelTimeoutHandoff:
                 seen.append(_timeout_result(exc))
 
         receiver_task = s.spawn(receiver)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.turn()
+            assert ch.balance == -1
 
         s.call_soon(ch.send, 5)
         s.run()
@@ -616,9 +630,10 @@ class TestChannelTimeoutHandoff:
             except TimeoutError as exc:
                 seen.append(_timeout_result(exc))
 
-        s.spawn(receiver)
-        s.turn()
-        assert ch.balance == -1
+        with s.running():
+            s.spawn(receiver)
+            s.turn()
+            assert ch.balance == -1
 
         sender_task = s.spawn(sender)
         s.run()
@@ -652,8 +667,9 @@ class TestChannelTimeoutHandoff:
                 seen.append(_timeout_result(exc))
 
         sender_task = s.spawn(sender)
-        s.turn()
-        assert ch.balance == 1
+        with s.running():
+            s.turn()
+            assert ch.balance == 1
 
         receiver_task = s.spawn(receiver)
         s.run()
@@ -726,8 +742,9 @@ class TestChannelTempval:
             ch.send(5)
 
         task = s.spawn(sender)
-        s.turn()
-        assert task.tempval == (False, 5)
+        with s.running():
+            s.turn()
+            assert task.tempval == (False, 5)
 
         def receiver() -> None:
             assert ch.receive() == 5
@@ -745,17 +762,18 @@ class TestChannelTempval:
             assert ch.receive() == 5
 
         task = s.spawn(receiver)
-        s.turn()
-        assert task.tempval is None
+        with s.running():
+            s.turn()
+            assert task.tempval is None
 
-        def commit() -> None:
-            ch.send(5)
-            seen.append(task.tempval)
+            def commit() -> None:
+                ch.send(5)
+                seen.append(task.tempval)
 
-        s.call_soon(commit)
-        s.turn()
-        assert seen == [(False, 5)]
-        assert task.tempval is None
+            s.call_soon(commit)
+            s.turn()
+            assert seen == [(False, 5)]
+            assert task.tempval is None
 
     def test_async_send_holds_the_packet_on_the_event(self):
         ch = Channel()

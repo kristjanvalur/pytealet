@@ -825,8 +825,8 @@ class ProactorIOManager:
         """Drain ``data``. ``callback(result, exception)`` runs on the scheduler.
 
         Same submit as ``sock_sendall``, without a progress callback.
-        ``call_on_scheduler`` runs the callback inline on a live turn, and
-        otherwise queues it and wakes the driver. The callback receives the
+        ``call_on_scheduler`` runs the callback on the owner thread and queues
+        it from any other thread. A blocked driver is woken. The callback receives the
         ``send_all`` pair: the full length on success, and ``(None, exception)``
         on failure. A later shutdown or close on this socket waits on the fd
         FIFO. Callers that must cancel keep the ``OpHandle`` from

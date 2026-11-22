@@ -333,7 +333,7 @@ class TealetSocket:
         if binary:
             return buffer
         # text_encoding exists from 3.10; the stub ty uses does not list it.
-        chosen = io.text_encoding(encoding)  # ty: ignore[unresolved-attribute]
+        chosen = io.text_encoding(encoding)  # ty: ignore[missing-attribute]
         text = io.TextIOWrapper(buffer, chosen, errors, newline)
         text.mode = mode  # ty: ignore[invalid-assignment]
         return text

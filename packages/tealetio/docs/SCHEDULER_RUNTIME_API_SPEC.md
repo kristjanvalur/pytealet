@@ -234,9 +234,10 @@ Semantics:
   current main tealet is wrapped using this scheduler's configured task constructor.
   With the default factory that wrapper is a `Task`; with a priority
   factory it may be a `PriorityTask` or another scheduler-compatible subclass.
-- The context is reentrant for the same scheduler. Entering it again while the
-  same scheduler factory is active is a no-op, and exiting restores the previous
-  low-level tealet factory.
+- The context is reentrant for the same scheduler and task constructor.
+  Entering it again does not replace the main tealet. A different constructor
+  installs that factory until the inner block exits. The outermost exit
+  restores the previous low-level tealet factory.
 - Code running inside a scheduler-owned `Task` already has the right
   scheduler shape. Code running from the raw process main tealet must enter
   `with scheduler.main_context():` before directly cancelling, throwing into,
@@ -244,16 +245,34 @@ Semantics:
 - `Task.run()`, `Task.throw(...)`, and cancellation do not create
   this context themselves. The boundary is owned by scheduler/runner driving
   APIs and by explicit low-level callers.
-- Sync driving entry points (`run()`, `run_forever()`,
-  `run_until_complete(...)`, and `turn()`) and async driving entry points
-  (`arun(...)`, `arun_forever()`, and `arun_until_complete(...)`) enter
-  `main_context()` automatically. `Runner.run()`, `Runner.close()`,
-  `AsyncRunner.run()`, and `AsyncRunner.aclose()` also enter it while creating
-  and draining their main and shutdown tasks.
-- Priority-based schedulers also temporarily give the driving main tealet an
-  internal infinity priority while the scheduler is being driven. This keeps
-  real runnable work ahead of the driver and is an implementation detail rather
-  than a public priority band.
+- `running()` enters `main_context()` and holds driver priority and the
+  owner thread for the whole block. `run()`, `run_forever()`,
+  `run_until_complete(...)`, and the async entry points enter `running()`
+  for the drive loop. `run_until_complete` spawns a callable before that
+  context, while `is_running()` is still false, so an eager factory queues
+  the entry. The loop then runs until that future is done. `Runner.run()`
+  spawns before it calls `run_until_complete`. `turn()` requires
+  `running()` and does not enter it again, so the main tealet stays a
+  scheduler task between slices. Those drive methods also enter
+  `main_context()` themselves; re-entry keeps the same tealet.
+- `Runner` and `AsyncRunner` are context managers. `run()` requires that
+  block. Entering the runner holds one `main_context()` until the block
+  exits. `close()` / `aclose()` cancel leftovers on that same main tealet,
+  and leaving the block restores the previous factory. Repeated `run()`
+  calls in one block keep the tealet. `run()`, `run_async()`, and
+  `run_asyncio_in_tealet()` are:
+
+  ```python
+  with Runner() as runner:
+      try:
+          return runner.run(entry)
+      finally:
+          runner.close()
+  ```
+- Priority-based schedulers give the driving main tealet an internal
+  infinity priority for the whole `running()` block, including the gaps
+  between `turn()` slices. This keeps real runnable work ahead of the
+  driver and is an implementation detail rather than a public priority band.
 
 Example:
 
@@ -578,7 +597,11 @@ Return behavior:
 
 - Creates a scheduler using `scheduler_factory` (or default scheduler creator).
 - Installs scheduler as current for runtime scope.
-- Runs entry to completion.
+- Requires the runner context manager. The `with` block holds the scheduler
+  main context, including across repeated `run()` calls.
+- Runs entry to completion inside that block.
+- `close()` drains cancelled tasks before the block leaves the context.
+  Leaving the block restores the previous tealet factory.
 - Ensures deterministic cleanup:
   - pending scheduler waits resolved/cancelled
   - scheduler running marker cleared
@@ -591,7 +614,11 @@ Return behavior:
 - Creates a scheduler using `scheduler_factory` (or default async scheduler
   creator).
 - Installs scheduler as current for runtime scope.
-- Runs entry to completion inside the active asyncio task.
+- Requires the runner context manager. The `async with` block holds the
+  scheduler main context, including across repeated `run()` calls.
+- Runs entry to completion inside the active asyncio task and that block.
+- `aclose()` drains cancelled tasks before the block leaves the context.
+  Leaving the block restores the previous tealet factory.
 - Uses `aclose()` for deterministic async cleanup, and supports
   `async with AsyncRunner() as runner: ...` as the async counterpart to
   `with Runner() as runner: ...`. `AsyncRunner` deliberately follows Python's
@@ -789,8 +816,14 @@ IO-manager adapters.
 
 Status: Implemented.
 
-- `scheduler.is_running()` is defined as: a run call is currently active (not
-  merely "created" or "not closed").
+- `scheduler.is_running()` is true for a whole `run()` / `arun()` call and
+  for the whole `running()` block a host holds across many turns. `turn()`
+  requires `running()` and does not extend that flag by itself. It is not
+  merely "created" or "not closed". `in_turn()` is true only while
+  `turn()`, `run()`, or `arun()` is on the stack.
+  `get_running_scheduler()` follows `is_running()`. `running()` is the same
+  driver context as `run()`: main-tealet factory, driver priority, and the
+  owner thread.
 - Runner initialization rejects replacement while the currently bound scheduler
   is running.
 
@@ -819,13 +852,21 @@ Status: Implemented for current sync/async scheduler drivers.
   while they run, including `call_later(0)`, waits for
   the next drain.
   `call_soon` is not cancellable, does not return a handle, and does not
-  `break_wait` (the caller is in a live turn). `call_soon_threadsafe` always
+  `break_wait`. `call_soon_threadsafe` always
   `_break_wait`s and copies context. `call_on_scheduler` does not copy
-  context: on a live turn it runs on the current stack, otherwise it queues
-  and `_break_wait`s. `stop()`, `_make_runnable`, and timer enqueue
-  `_break_wait` only when `_in_owner_live_turn()` is false: a user tealet or
-  callback drain is already on the owner thread, but hosted `arun` parked in
-  asyncio wait is not a live turn even though `_owner_thread` is still set.
+  context. The owner thread runs it on the current stack. Any other thread
+  queues it and wakes the driver. When that owner callback runs while
+  `_in_driver_wait` is set (the flag around `_driver_wait` in
+  `_idle_or_poll`), it calls `_break_wait` afterwards so a `PulseEvent.set`
+  in the callback is serviced when the wait returns. That flag is not
+  `_runner`, not `_in_callback_drain`, and not the ring's
+  `skip_owner_break_wait`. `stop()`, `_make_runnable`, and timer enqueue
+  call `_wake_driver` from another thread, from the owner thread between
+  `turn()` slices, and from the owner thread while `_in_driver_wait` is set.
+  During a slice the owner thread reads its queues before the next park.
+  `_owner_thread` stays set for the whole `running()` block. It is `None`
+  outside `running()` / `run` / `arun`, so those callers wake too. A wake
+  between slices posts `set_driver_wakeup` on the owner thread as well.
   Nested `_run_ready_timers` calls no-op. Callbacks must
   not block-wait; they may eager-switch. Eager spawn, `Task.throw()` /
   `cancel()`, and `_park_current` of the drain tealet park the caller
@@ -866,8 +907,8 @@ Status: Implemented.
   `_break_wait` forwards to it (one method; safe from any thread). Production
   IO wakes through operation `add_done_callback` → `call_soon_threadsafe` →
   `_break_wait` → `wake_wait()`, not proactor-internal completion hooks.
-  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` do
-  only when the driver may be parked (`not _in_owner_live_turn()`).
+  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` wake
+  when `_in_driver_wait` is set, and when the caller is not the owner thread.
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter

@@ -442,7 +442,8 @@ class TestFutureExamples:
                 future.wait()
 
         waiter_task = s.spawn(waiter)
-        s.turn()
+        with s.running():
+            s.turn()
         with s.main_context():
             waiter_task.throw(RawTimeoutError())
         s.run()

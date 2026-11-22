@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 from tealetio import Scheduler, set_scheduler
 
 
@@ -13,8 +15,10 @@ def run_batch(scheduler, n: int) -> int:
     """Run at most ``n`` ready transfers.
 
     Tests of the batch cap use this. Hosts drive with ``turn()``, which runs
-    one whole ready batch and then polls.
+    one whole ready batch and then polls. ``turn()`` needs ``running()``;
+    this enters it when the caller has not.
     """
 
-    with scheduler._driving():
+    session = nullcontext() if scheduler.is_running() else scheduler.running()
+    with session, scheduler._driving():
         return scheduler._run_ready_batch(n)

@@ -136,18 +136,17 @@ class TestAsyncRunner:
 
     def test_run_sync_callable_binds_runner_scheduler(self):
         async def run() -> None:
-            runner = AsyncRunner()
             seen = []
 
             def entry() -> str:
                 seen.append(get_running_scheduler())
                 return "ok"
 
-            result = await runner.run(entry)
-            assert result == "ok"
-            assert runner.get_scheduler() is not None
-            assert seen == [runner.get_scheduler()]
-            await runner.aclose()
+            async with AsyncRunner() as runner:
+                result = await runner.run(entry)
+                assert result == "ok"
+                assert runner.get_scheduler() is not None
+                assert seen == [runner.get_scheduler()]
 
         asyncio.run(run())
 
@@ -167,25 +166,22 @@ class TestAsyncRunner:
                     _tealet.get_tealet_factory() is not original_factory,
                 )
 
-            try:
+            async with runner:
                 assert await runner.run(entry) == (True, True, task_module.TEALET_PRI_INF, True)
-                assert _tealet.get_tealet_factory() is original_factory
-            finally:
-                await runner.aclose()
+                assert _tealet.get_tealet_factory() is not original_factory
+            assert _tealet.get_tealet_factory() is original_factory
 
         asyncio.run(run())
 
     def test_run_rejects_awaitable_entry(self):
         async def run() -> None:
-            runner = AsyncRunner()
-
             coro = asyncio.sleep(0)
             try:
-                with pytest.raises(TypeError, match="entry must be a callable or Future"):
-                    await runner.run(coro)
+                async with AsyncRunner() as runner:
+                    with pytest.raises(TypeError, match="entry must be a callable or Future"):
+                        await runner.run(coro)
             finally:
                 coro.close()
-                await runner.aclose()
 
         asyncio.run(run())
 
@@ -260,11 +256,16 @@ class TestAsyncRunner:
 
     def test_async_context_manager_initializes_and_closes(self):
         async def run() -> None:
+            original_factory = _tealet.get_tealet_factory()
             async with AsyncRunner() as runner:
                 scheduler = runner.get_scheduler()
                 assert isinstance(scheduler, AsyncScheduler)
-                assert await runner.run(lambda: "ok") == "ok"
+                held = _tealet.get_tealet_factory()
+                assert held is not original_factory
+                assert await runner.run(lambda: _tealet.main()) is _tealet.main()
+                assert _tealet.get_tealet_factory() is held
 
+            assert _tealet.get_tealet_factory() is original_factory
             with pytest.raises(RuntimeError, match="runner is closed"):
                 runner.get_scheduler()
 
@@ -394,27 +395,21 @@ class TestAsyncRunner:
             override_ctx = contextvars.copy_context()
             override_ctx.run(marker.set, "override-context")
 
-            runner = AsyncRunner(context=runner_ctx)
-            try:
+            async with AsyncRunner(context=runner_ctx) as runner:
                 assert await runner.run(lambda: marker.get()) == "runner-context"
                 assert await runner.run(lambda: marker.get(), context=override_ctx) == "override-context"
-            finally:
-                await runner.aclose()
 
         asyncio.run(run())
 
     def test_run_future_entry_waits(self):
         async def run() -> None:
-            runner = AsyncRunner()
-            try:
+            async with AsyncRunner() as runner:
                 future: Future[int] = Future()
                 scheduler = runner.get_scheduler()
                 scheduler.call_soon(future.set_result, 123)
                 assert await runner.run(future) == 123
                 assert future.done() is True
                 assert future.result() == 123
-            finally:
-                await runner.aclose()
 
         asyncio.run(run())
 
@@ -443,12 +438,9 @@ class TestAsyncRunner:
                 raise
 
         async def run_case() -> None:
-            runner = AsyncRunner()
-            try:
+            async with AsyncRunner() as runner:
                 with pytest.raises(KeyboardInterrupt):
                     await runner.run(entry)
-            finally:
-                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -467,12 +459,9 @@ class TestAsyncRunner:
             handler(signal.SIGINT, None)
 
         async def run_case() -> None:
-            runner = AsyncRunner()
-            try:
+            async with AsyncRunner() as runner:
                 with pytest.raises(KeyboardInterrupt):
                     await runner.run(entry)
-            finally:
-                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -485,12 +474,9 @@ class TestAsyncRunner:
 
         async def run_case() -> None:
             outer_handler = signals.handler
-            runner = AsyncRunner()
-            try:
+            async with AsyncRunner() as runner:
                 assert await runner.run(lambda: signals.handler) is not outer_handler
                 assert signals.handler is outer_handler
-            finally:
-                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -502,12 +488,9 @@ class TestAsyncRunner:
 
         async def run_case() -> None:
             outer_handler = signals.handler
-            runner = AsyncRunner(handle_sigint=False)
-            try:
+            async with AsyncRunner(handle_sigint=False) as runner:
                 assert await runner.run(lambda: signals.handler) is outer_handler
                 assert signals.handler is outer_handler
-            finally:
-                await runner.aclose()
 
         asyncio.run(run_case())
 
@@ -524,13 +507,10 @@ class TestRunnerScopeComposition:
             outer_scheduler = outer.get_scheduler()
             assert _current_scheduler() is outer_scheduler
 
-            inner = Runner()
-            try:
+            with Runner() as inner:
                 inner_scheduler = inner.get_scheduler()
                 assert _current_scheduler() is inner_scheduler
                 assert inner.run(lambda: "inner") == "inner"
-            finally:
-                inner.close()
 
             assert _current_scheduler() is outer_scheduler
         finally:
@@ -548,13 +528,10 @@ class TestRunnerScopeComposition:
                 outer_scheduler = outer.get_scheduler()
                 assert _current_scheduler() is outer_scheduler
 
-                inner = AsyncRunner()
-                try:
+                async with AsyncRunner() as inner:
                     inner_scheduler = inner.get_scheduler()
                     assert _current_scheduler() is inner_scheduler
                     assert await inner.run(lambda: "inner") == "inner"
-                finally:
-                    await inner.aclose()
 
                 assert _current_scheduler() is outer_scheduler
             finally:
@@ -566,32 +543,24 @@ class TestRunnerScopeComposition:
 
     def test_sync_runner_rejects_init_inside_running_async_scheduler(self):
         async def run_case() -> None:
-            runner = AsyncRunner()
-
             def entry() -> None:
                 nested = Runner()
                 with pytest.raises(RuntimeError, match="another scheduler is running"):
                     nested.get_scheduler()
 
-            try:
+            async with AsyncRunner() as runner:
                 await runner.run(entry)
-            finally:
-                await runner.aclose()
 
         asyncio.run(run_case())
 
     def test_async_runner_rejects_init_inside_running_sync_scheduler(self):
-        runner = Runner()
-
         def entry() -> None:
             nested = AsyncRunner()
             with pytest.raises(RuntimeError, match="another scheduler is running"):
                 nested.get_scheduler()
 
-        try:
+        with Runner() as runner:
             runner.run(entry)
-        finally:
-            runner.close()
 
 
 class TestRunner:
@@ -625,12 +594,9 @@ class TestRunner:
         assert closed is True
 
     def test_run_sync_callable(self):
-        runner = Runner()
-        try:
+        with Runner() as runner:
             result = runner.run(lambda: "ok")
             assert result == "ok"
-        finally:
-            runner.close()
 
     def test_run_sync_callable_binds_runner_scheduler(self):
         seen = []
@@ -639,14 +605,11 @@ class TestRunner:
             seen.append(get_running_scheduler())
             return "ok"
 
-        runner = Runner()
-        try:
+        with Runner() as runner:
             result = runner.run(entry)
             assert result == "ok"
             assert runner.get_scheduler() is not None
             assert seen == [runner.get_scheduler()]
-        finally:
-            runner.close()
 
     def test_run_sync_callable_sets_main_tealet_factory_from_task_factory(self):
         runner = Runner()
@@ -663,11 +626,10 @@ class TestRunner:
                 _tealet.get_tealet_factory() is not original_factory,
             )
 
-        try:
+        with runner:
             assert runner.run(entry) == (True, True, task_module.TEALET_PRI_INF, True)
-            assert _tealet.get_tealet_factory() is original_factory
-        finally:
-            runner.close()
+            assert _tealet.get_tealet_factory() is not original_factory
+        assert _tealet.get_tealet_factory() is original_factory
 
     def test_run_awaitable_entry_raises(self):
         async def entry() -> str:
@@ -675,40 +637,47 @@ class TestRunner:
             return "done"
 
         coro = entry()
-        runner = Runner()
         try:
-            with pytest.raises(TypeError, match="entry must be a callable or Future"):
-                runner.run(coro)
+            with Runner() as runner:
+                with pytest.raises(TypeError, match="entry must be a callable or Future"):
+                    runner.run(coro)
         finally:
             coro.close()
+
+    def test_run_requires_context_manager(self):
+        runner = Runner()
+        try:
+            with pytest.raises(RuntimeError, match="context manager"):
+                runner.run(lambda: None)
+        finally:
             runner.close()
 
     def test_context_manager(self):
+        original_factory = _tealet.get_tealet_factory()
         with Runner() as runner:
-            assert runner.run(lambda: 7) == 7
+            held = _tealet.get_tealet_factory()
+            assert held is not original_factory
+            assert runner.run(lambda: _tealet.main()) is _tealet.main()
+            assert _tealet.get_tealet_factory() is held
+        assert _tealet.get_tealet_factory() is original_factory
 
     def test_run_multiple_times_reuses_scheduler(self):
-        runner = Runner()
-        try:
+        with Runner() as runner:
             first = runner.run(lambda: get_running_scheduler())
             second = runner.run(lambda: get_running_scheduler())
             assert first is second
             assert first is runner.get_scheduler()
-        finally:
-            runner.close()
 
     def test_run_uses_runner_creation_context(self):
         import contextvars
+
         marker: contextvars.ContextVar[str] = contextvars.ContextVar("marker", default="default")
         marker.set("ambient")
         ctx = contextvars.copy_context()
         ctx.run(marker.set, "runner-context")
 
-        runner = Runner(context=ctx)
-        try:
+        with Runner(context=ctx) as runner:
             assert runner.run(lambda: marker.get()) == "runner-context"
-        finally:
-            runner.close()
 
     def test_run_context_override_uses_explicit_context(self):
         import contextvars
@@ -722,16 +691,12 @@ class TestRunner:
         override_ctx = contextvars.copy_context()
         override_ctx.run(marker.set, "override-context")
 
-        runner = Runner(context=runner_ctx)
-        try:
+        with Runner(context=runner_ctx) as runner:
             assert runner.run(lambda: marker.get()) == "runner-context"
             assert runner.run(lambda: marker.get(), context=override_ctx) == "override-context"
-        finally:
-            runner.close()
 
     def test_run_future_entry_waits(self):
-        runner = Runner()
-        try:
+        with Runner() as runner:
             future: Future[int] = Future()
             scheduler = runner.get_scheduler()
             scheduler.call_soon(future.set_result, 123)
@@ -740,8 +705,6 @@ class TestRunner:
             assert runner.run(future) == 123
             assert future.done() is True
             assert future.result() == 123
-        finally:
-            runner.close()
 
     def test_close_prevents_reuse(self):
         runner = Runner()
@@ -765,7 +728,8 @@ class TestRunner:
                 seen.append("finally")
 
         task = scheduler.spawn(worker)
-        scheduler.turn()
+        with scheduler.running():
+            scheduler.turn()
 
         runner.close()
 
@@ -799,7 +763,8 @@ class TestRunner:
                 release_worker.set()
 
         scheduler.spawn(worker, eager_start=False)
-        scheduler.turn()
+        with scheduler.running():
+            scheduler.turn()
 
         runner.close()
 
@@ -840,7 +805,8 @@ class TestRunner:
                 raise
 
         closer_task = scheduler.spawn(closer)
-        scheduler.turn()
+        with scheduler.running():
+            scheduler.turn()
         scheduler.shutdown_tasks = [closer_task, victim_task]
 
         runner.close()
@@ -893,12 +859,9 @@ class TestRunner:
                 seen.append("cancelled")
                 raise
 
-        runner = Runner()
-        try:
+        with Runner() as runner:
             with pytest.raises(KeyboardInterrupt):
                 runner.run(entry)
-        finally:
-            runner.close()
 
         assert seen == ["start", "cancelled"]
         assert signals.handler is signal.default_int_handler
@@ -914,12 +877,9 @@ class TestRunner:
             handler(signal.SIGINT, None)
             handler(signal.SIGINT, None)
 
-        runner = Runner()
-        try:
+        with Runner() as runner:
             with pytest.raises(KeyboardInterrupt):
                 runner.run(entry)
-        finally:
-            runner.close()
 
         assert seen == ["start"]
         assert signals.handler is signal.default_int_handler
@@ -928,17 +888,61 @@ class TestRunner:
     def test_handle_sigint_false_does_not_install_handler(self, monkeypatch):
         signals = FakeSignals(monkeypatch)
 
-        runner = Runner(handle_sigint=False)
-        try:
+        with Runner(handle_sigint=False) as runner:
             assert runner.run(lambda: signals.handler) is signal.default_int_handler
-        finally:
-            runner.close()
 
         assert signals.installed == []
         assert signals.handler is signal.default_int_handler
 
 
 class TestRunHelper:
+    def test_run_helper_keeps_one_main_tealet_through_shutdown(self):
+        seen: dict[str, object] = {}
+        started = Event()
+
+        def parked() -> None:
+            seen["during-run"] = _tealet.main()
+            try:
+                started.set()
+                Event().swait()
+            finally:
+                seen["during-close"] = _tealet.main()
+
+        def entry() -> None:
+            seen["entry"] = _tealet.main()
+            get_running_scheduler().spawn(parked)
+            started.swait()
+
+        original_factory = _tealet.get_tealet_factory()
+        run(entry)
+        assert seen["entry"] is seen["during-run"] is seen["during-close"]
+        assert _tealet.get_tealet_factory() is original_factory
+
+    def test_run_async_helper_keeps_one_main_tealet_through_shutdown(self):
+        seen: dict[str, object] = {}
+        started = Event()
+
+        def parked() -> None:
+            seen["during-run"] = _tealet.main()
+            try:
+                started.set()
+                Event().swait()
+            finally:
+                seen["during-close"] = _tealet.main()
+
+        def entry() -> None:
+            seen["entry"] = _tealet.main()
+            get_running_scheduler().spawn(parked)
+            started.swait()
+
+        async def orchestrate() -> None:
+            await run_async(entry)
+
+        original_factory = _tealet.get_tealet_factory()
+        asyncio.run(orchestrate())
+        assert seen["entry"] is seen["during-run"] is seen["during-close"]
+        assert _tealet.get_tealet_factory() is original_factory
+
     def test_run_helper_runs_callable(self):
         assert run(lambda: 42) == 42
 

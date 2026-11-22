@@ -201,7 +201,7 @@ class FifoRunnableQueue(RunnableQueueBase):
 
     def tasks(self) -> tuple[_tasks.Task, ...]:
         # runnable set only holds scheduler Tasks
-        return tuple(self._items)  # ty: ignore[invalid-return-type]
+        return tuple(self._items)  # ty: ignore[invalid-explicit-return]
 
     def reschedule(self, task: tealet.tealet, position: int | None) -> None:
         if task not in self._set:
@@ -271,7 +271,7 @@ class PriorityRunnableQueue(RunnableQueueBase):
         return (
             *self._prescheduled,
             *(entry[2] for entry in sorted(self._priority_items)),
-        )  # ty: ignore[invalid-return-type]
+        )  # ty: ignore[invalid-explicit-return]
 
     def _active_priority(self, task: tealet.tealet) -> Any:
         get_priority = getattr(task, "get_effective_priority", None)
@@ -356,7 +356,15 @@ class CoreSchedulerDrivingAPI(ABC):
 
     @abstractmethod
     def is_running(self) -> bool:
-        """Return whether this scheduler is currently driving."""
+        """Return whether ``run``, ``arun``, or ``running()`` is active."""
+
+    @abstractmethod
+    def in_turn(self) -> bool:
+        """Return whether ``turn``, ``run``, or ``arun`` is on the stack."""
+
+    @abstractmethod
+    def running(self) -> AbstractContextManager[None]:
+        """Hold the ``run()`` driver context across an external ``turn`` loop."""
 
     @abstractmethod
     def set_debug(self, enabled: bool) -> None:
@@ -487,7 +495,15 @@ class BaseDrivingMixin:
             self._poll_io()
             await self._driver_yield()
             return
-        await self._driver_wait()
+        # blocked-driver signal. only this wait. the owner thread uses it
+        # to break the wait from call_on_scheduler, stop, timer enqueue,
+        # and _make_runnable. not the batch runner, not callback drain,
+        # and not the ring's owner break_wait policy.
+        self._in_driver_wait = True
+        try:
+            await self._driver_wait()
+        finally:
+            self._in_driver_wait = False
 
     def _before_arun(self) -> None:
         pass
@@ -521,19 +537,14 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+        with self.main_context(), self.running():
             self._before_arun()
-            self._running = True
-            self._owner_thread = threading.get_ident()
-            try:
+            with self._slice():
                 while not self._arun_should_terminate():
                     self._run_ready_batch(yield_every)
                     if self._arun_should_terminate():
                         break
                     await self._idle_or_poll()
-            finally:
-                self._owner_thread = None
-                self._running = False
 
     async def arun_forever(self, *, yield_every: int | None = None) -> None:
         """Run scheduler work until `stop()` is called."""
@@ -541,20 +552,17 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+        with self.main_context(), self.running():
             self._before_arun()
             self._stopping = False
-            self._running = True
-            self._owner_thread = threading.get_ident()
             try:
-                while not self._stopping:
-                    self._run_ready_batch(yield_every)
-                    if self._stopping:
-                        break
-                    await self._idle_or_poll()
+                with self._slice():
+                    while not self._stopping:
+                        self._run_ready_batch(yield_every)
+                        if self._stopping:
+                            break
+                        await self._idle_or_poll()
             finally:
-                self._owner_thread = None
-                self._running = False
                 self._stopping = False
 
     async def arun_until_complete(
@@ -568,7 +576,10 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+        # create the entry before running(). is_running() becomes true only
+        # inside that context, so an eager factory queues the entry behind
+        # work that is already runnable. the loop below then drives it.
+        with self.main_context():
             if isinstance(future, _tasks.Future):
                 target: _tasks.Future[T] = future
                 if isinstance(target, _tasks.Task) and target.get_scheduler() is not self:
@@ -578,33 +589,31 @@ class BaseDrivingMixin:
             else:
                 raise TypeError("future must be a Future or callable")
 
+        with self.running():
             self._before_arun()
             self._stopping = False
-            self._running = True
-            self._owner_thread = threading.get_ident()
             try:
-                prev_wait = False
-                while not target.done() and not self._stopping:
-                    sched_note_loop_iter()
-                    t0 = time.perf_counter_ns()
-                    n_xfer = self._run_ready_batch(yield_every)
-                    sched_note_batch(n_xfer, time.perf_counter_ns() - t0)
-                    if prev_wait and n_xfer == 0:
-                        sched_note_wait_no_progress()
+                with self._slice():
                     prev_wait = False
-                    if target.done() or self._stopping:
-                        break
-                    busy = self._has_local_ready_work()
-                    if busy:
-                        sched_note_busy_continue()
-                    t1 = time.perf_counter_ns()
-                    await self._idle_or_poll()
-                    if not busy:
-                        sched_note_wait(time.perf_counter_ns() - t1)
-                        prev_wait = True
+                    while not target.done() and not self._stopping:
+                        sched_note_loop_iter()
+                        t0 = time.perf_counter_ns()
+                        n_xfer = self._run_ready_batch(yield_every)
+                        sched_note_batch(n_xfer, time.perf_counter_ns() - t0)
+                        if prev_wait and n_xfer == 0:
+                            sched_note_wait_no_progress()
+                        prev_wait = False
+                        if target.done() or self._stopping:
+                            break
+                        busy = self._has_local_ready_work()
+                        if busy:
+                            sched_note_busy_continue()
+                        t1 = time.perf_counter_ns()
+                        await self._idle_or_poll()
+                        if not busy:
+                            sched_note_wait(time.perf_counter_ns() - t1)
+                            prev_wait = True
             finally:
-                self._owner_thread = None
-                self._running = False
                 self._stopping = False
 
         if not target.done():
@@ -1457,7 +1466,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runnable_link = _RunnableLink(self)
         self._all_tasks: weakref.WeakSet[_tasks.Task] = weakref.WeakSet()
         self._runner = None
+        # true for the whole run()/arun() call and for the whole running()
+        # block a host holds across many turns. turn() requires it.
         self._running = False
+        # true only while turn(), run(), or arun() is on the stack.
+        self._in_turn = False
         self._owner_thread: int | None = None
         self._debug = False
         self._stopping = False
@@ -1482,6 +1495,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._exception_handler: Callable[[dict[str, Any]], object] | None = None
         self._in_callback_drain = False
         self._callback_drain_task: tealet.tealet | None = None
+        # true only while _idle_or_poll is inside _driver_wait
+        self._in_driver_wait = False
         # host loop (Qt, asyncio) parked outside run(); None while run() owns the wait
         self._host_wakeup: Callable[[], None] | None = None
 
@@ -1498,9 +1513,60 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         raise NotImplementedError(f"{type(self).__name__} does not support bind_loop()")
 
     def is_running(self) -> bool:
-        """Return True while this scheduler is being driven."""
+        """Return True while this scheduler is inside ``run``, ``arun``, or ``running()``.
+
+        Stays true between ``turn`` slices. A bare ``turn`` outside
+        ``running()`` raises.
+        """
 
         return self._running
+
+    def in_turn(self) -> bool:
+        """Return True while ``turn``, ``run``, or ``arun`` is on the stack.
+
+        False in the gaps of a ``running()`` block, where ``is_running()``
+        stays true and the host is waiting outside this scheduler.
+        """
+
+        return self._in_turn
+
+    @contextmanager
+    def running(self):
+        """Hold the ``run()`` driver context for one external ``turn`` loop.
+
+        Installs this scheduler's task factory on the main tealet, gives
+        that tealet driver priority, and records this thread as the owner.
+        Entering ``main_context`` again for the same factory does not
+        replace that tealet.
+        ``is_running()`` and ``get_running_scheduler()`` stay true for the
+        whole block, including while the host waits between slices. The
+        main tealet stays a scheduler task across those gaps, so an eager
+        spawn there can park this stack and switch back. ``turn`` requires
+        this context. ``run`` and ``arun`` enter it themselves and cannot
+        be called again inside the block.
+        """
+
+        self._verify_current_scheduler()
+        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
+            self._running = True
+            self._owner_thread = threading.get_ident()
+            try:
+                yield
+            finally:
+                self._owner_thread = None
+                self._running = False
+
+    @contextmanager
+    def _slice(self):
+        # one turn() or the whole run()/arun() loop. running() already holds
+        # the driver context and the owner thread; this only marks the slice.
+        assert self._running
+        assert not self._in_turn
+        self._in_turn = True
+        try:
+            yield
+        finally:
+            self._in_turn = False
 
     def _poll_io(self) -> None:
         """Non-blocking I/O harvest. Default: no driver backend."""
@@ -1626,7 +1692,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             )
 
     def main_context(self) -> AbstractContextManager[None]:
-        """Use this scheduler's task factory for the current main tealet wrapper."""
+        """Use this scheduler's task factory for the current main tealet.
+
+        Re-entering the same scheduler and task constructor keeps that
+        tealet. The outermost exit restores the previous factory.
+        """
+
         return _tasks.scheduler_tealet_factory(self)
 
     def close(self) -> None:
@@ -1713,7 +1784,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             proto,
             flags,
         ).wait()
-        return info  # ty: ignore[invalid-return-type]
+        return info  # ty: ignore[invalid-explicit-return]
 
     def getnameinfo(self, sockaddr: tuple[Any, ...], flags: int = 0) -> tuple[str, str]:
         """Reverse-resolve ``sockaddr`` on a worker thread without blocking the scheduler thread."""
@@ -1822,8 +1893,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Ask the currently running driver loop to stop."""
 
         self._stopping = True
-        if not self._in_owner_live_turn():
-            self._wake_driver()
+        # owner thread outside the blocking wait checks _stopping before it parks.
+        self._wake_unless_owner_driving()
 
     # -- Callback and timer scheduling --------------------------------
 
@@ -1872,29 +1943,23 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> None:
         """Run `callback(*args)` on the scheduler thread without copying context.
 
-        Worker completions have no tealet context to keep. On a live turn (a
-        task or callback drain) the callback runs on this stack. Otherwise it
-        is queued and the driver is woken. The owner thread is not enough:
-        hosted ``arun`` parked in asyncio still queues, so the callback does
-        not re-enter on the asyncio stack.
+        The owner thread is the thread inside ``running()``, ``run()``, or
+        ``arun()``, including the gaps between ``turn`` slices. That thread
+        runs the callback on this stack. Any other thread queues it and
+        wakes the driver. When the owner runs it while the driver is blocked
+        in ``_driver_wait``, ``_break_wait`` runs afterwards so a
+        ``PulseEvent.set`` inside the callback is serviced as soon as that
+        wait returns. The callback may queue runnable work. It must not
+        switch tealets from an asyncio stack or from inside that wait.
         """
 
-        if self._in_owner_live_turn():
+        if threading.get_ident() == self._owner_thread:
             self._run_callback(callback, args, None)
+            if self._in_driver_wait:
+                self._break_wait()
             return
         self._ready_callbacks.append((callback, args, None))
         self._wake_driver()
-
-    def _in_owner_live_turn(self) -> bool:
-        # Owner OS thread is not enough: hosted arun keeps _owner_thread set
-        # while the driver Task is parked in asyncio wait. call_on_scheduler
-        # runs inline only when a user tealet or callback drain is on the stack.
-        if self._owner_thread != threading.get_ident():
-            return False
-        if self._in_callback_drain:
-            return True
-        current = _tasks.get_current()
-        return current is not None and current is not self._runner
 
     def call_later(
         self,
@@ -1905,10 +1970,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     ) -> TimerHandle:
         """Schedule `callback(*args)` to run after `delay` seconds.
 
-        A timer armed while the driver is parked wakes it, including from
-        the owner thread while hosted ``arun`` is blocked in asyncio. A
-        timer armed from a live turn (a task or callback drain) does not:
-        the driver reads the heap before it parks again.
+        Arming a timer wakes the driver from another thread, from the owner
+        thread between ``turn`` slices, and from the owner thread while the
+        driver is blocked in its wait. During a slice the owner thread reads
+        the heap before it parks again.
         """
 
         delay = max(delay, 0)
@@ -1934,10 +1999,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     def _enqueue_timer(self, when: float, handle: TimerHandle) -> None:
         heapq.heappush(self._timers, (when, next(self._timer_sequence), handle))
-        # a live turn reads the heap before the next park. hosted arun can
-        # already be inside asyncio wait on this same thread.
-        if not self._in_owner_live_turn():
-            self._wake_driver()
+        self._wake_unless_owner_driving()
 
     def _drain_ready_callbacks(self) -> int:
         # Drain one queued entry at a time. If a callback raises (e.g.
@@ -2220,11 +2282,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._runnable.add(t)
         self._bind_runnable(t)
         sched_note_make_runnable()
-        # skip the kick during a user tealet or callback drain: the driver
-        # is not parked. owner-thread alone is not enough — hosted arun keeps
-        # _owner_thread set while blocked in asyncio wait.
-        if not self._in_owner_live_turn():
-            self._wake_driver()
+        self._wake_unless_owner_driving()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
         # position 0: FIFO head, or immediate head when the queue has that lane.
@@ -2357,17 +2415,19 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     @contextmanager
     def _driving(self):
-        # one exclusive slice. run()/arun() hold the same flag across their
-        # wait, so turn() and run() cannot nest.
-        self._verify_current_scheduler()
-        with self.main_context(), _tasks.task_priority(tealet.current(), _tasks.TEALET_PRI_INF):
-            self._running = True
-            self._owner_thread = threading.get_ident()
-            try:
-                yield
-            finally:
-                self._owner_thread = None
-                self._running = False
+        # one turn() slice. running() holds the driver context. run()/arun()
+        # enter that themselves and use _slice directly, so they reject a
+        # nested turn via _in_turn.
+        if _current_scheduler() is not self:
+            raise RuntimeError("operation requires this scheduler to be the current scheduler")
+        if not self._running:
+            raise RuntimeError("turn() requires a running() context")
+        if self._in_turn:
+            raise RuntimeError("Scheduler already running")
+        if threading.get_ident() != self._owner_thread:
+            raise RuntimeError("turn() must run on the thread that entered running()")
+        with self._slice():
+            yield
 
     def set_driver_wakeup(self, callback: Callable[[], None] | None) -> None:
         """Ask `callback` to run another ``turn`` when the driver must wake.
@@ -2375,10 +2435,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         Used by a host loop that parks in its own ``exec`` instead of
         ``run()``. The callback may run on any thread and must not call
         ``turn``. Post onto the host loop (a queued Qt signal,
-        ``call_soon_threadsafe``). A wake on the driving thread is not
-        delivered. ``turn`` reports that slice's deadline, and ``run`` is
-        already blocked in its own wait; delivering the wake would schedule
-        another slice forever. The backend wake still runs, so a scheduler
+        ``call_soon_threadsafe``). A wake on the owner thread during a
+        slice is not delivered. ``turn`` reports that slice's deadline, and
+        ``run`` is already blocked in its own wait; delivering the wake
+        would schedule another slice forever. Between slices the owner
+        thread does deliver it, so a spawn on the host thread asks for
+        another ``turn``. The backend wake still runs, so a scheduler
         inside ``run()`` is unchanged when this is left unset.
         """
 
@@ -2396,8 +2458,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         next timer deadline, or ``None`` when nothing is scheduled. ``None``
         means sleep until ``set_driver_wakeup``. The default proactor posts
         that callback. An inline proactor does not; hosting one with
-        ``turn()`` is future work. Does not block. Holds the same driver
-        flag as ``run()``; the two cannot nest.
+        ``turn()`` is future work. Does not block. Requires ``running()``.
+        ``run()`` enters that context itself, so the two cannot nest.
         """
 
         with self._driving():
@@ -2409,21 +2471,34 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 return self.time()
             return self._next_timer_deadline()
 
+    def _wake_unless_owner_driving(self) -> None:
+        # during a slice the owner thread reads the queues before it parks,
+        # except while it is blocked in _driver_wait. between slices the
+        # host is outside turn(), so that same thread wakes and posts
+        # set_driver_wakeup. any other thread always wakes. before running()
+        # the owner is unset, so those callers wake too.
+        if self._in_turn and threading.get_ident() == self._owner_thread and not self._in_driver_wait:
+            return
+        self._wake_driver()
+
     def _wake_driver(self) -> None:
         """Wake the backend wait, then the host callback if one is installed.
 
-        A wake on the driving thread is not passed to the host. That thread
-        learns what to do from ``turn``'s deadline or from the next ``run``
-        iteration. Parking the driver at the start of a batch is such a
-        wake; reporting it would schedule another slice forever. Another
-        thread still notifies, including during ``turn``.
+        A wake on the owner thread during a slice is not passed to the host.
+        That thread learns what to do from ``turn``'s deadline or from the
+        next ``run`` iteration. Parking the driver at the start of a batch
+        is such a wake; reporting it would schedule another slice forever.
+        Between slices, and from any other thread, the host is notified.
         """
 
         self._break_wait()
         callback = self._host_wakeup
         if callback is None:
             return
-        if self._running and threading.get_ident() == self._owner_thread:
+        # the slice's own thread learns the next step from turn()'s deadline
+        # or from the next run() iteration. between slices _in_turn is clear,
+        # so the host thread still posts set_driver_wakeup.
+        if self._in_turn and threading.get_ident() == self._owner_thread:
             return
         deferred = getattr(_host_wakeup_defer, "pending", None)
         if deferred is not None:
@@ -2449,11 +2524,15 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         """Wake a parked backend wait. Safe from any thread.
 
         Callers use ``_wake_driver``, which also runs the host wakeup from
-        ``set_driver_wakeup``. Do not call this from an owner live turn (a
-        user tealet or callback drain): the driver is not parked.
-        ``call_soon`` never wakes. ``_make_runnable`` and timer enqueue wake
-        only when ``_in_owner_live_turn()`` is false, so a hosted loop parked
-        on the owner thread still unblocks.
+        ``set_driver_wakeup``. ``call_on_scheduler`` calls this directly when
+        the owner thread runs a callback during ``_in_driver_wait``.
+        ``call_soon`` never wakes. ``stop``, ``_make_runnable``, and timer
+        enqueue call ``_wake_driver`` from another thread, from the owner
+        thread between ``turn`` slices, and from the owner thread while
+        ``_in_driver_wait`` is set. During a slice the owner thread reads
+        its queues before the next park. ``_owner_thread`` is ``None``
+        outside ``running()`` / ``run`` / ``arun``, so those callers wake
+        too and a host receives ``set_driver_wakeup``.
         """
 
 

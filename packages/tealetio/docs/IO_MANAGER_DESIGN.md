@@ -487,8 +487,9 @@ proactor layer, not a third blocking-IO disposition.
 `complete()` does not store the result on the calling thread. It passes the
 pair to `call_on_scheduler`. That callback stores it and then sets a plain
 `Event`. The proactor calls `complete` once; a second call fails the assert
-in the callback. From a worker the callback is queued. From a live turn it
-runs inline. `wait()` parks on that event, so when `swait` returns the pair
+in the callback. The owner thread runs that callback immediately, including
+from inside the driver wait. Any other thread queues it and wakes the
+driver. `wait()` parks on that event, so when `swait` returns the pair
 is already stored.
 
 If `wait()` exits exceptionally (for example `timeout()` throwing into the

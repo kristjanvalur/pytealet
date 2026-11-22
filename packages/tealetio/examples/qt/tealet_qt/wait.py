@@ -17,11 +17,13 @@ _T = TypeVar("_T")
 
 
 def _notify(done: Event) -> None:
-    """Wake ``done`` on a scheduler turn.
+    """Wake ``done`` on the scheduler thread.
 
-    A Qt slot usually runs between turns. ``Event.set`` only works while the
-    scheduler is running, so the wake is queued and the host turns again.
-    From a tealet the same call runs inline.
+    A Qt slot usually runs between turns. The host holds ``scheduler.running()``,
+    so this thread is the owner and ``call_on_scheduler`` runs ``done.set``
+    here. That queues the parked tealet. The slice is not on the stack, so
+    the host is asked for another ``turn``. From a tealet the same call
+    runs inline and the driver is already on the stack.
     """
 
     get_scheduler().call_on_scheduler(done.set)

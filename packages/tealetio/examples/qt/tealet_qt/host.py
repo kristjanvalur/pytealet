@@ -90,8 +90,9 @@ class QtHost(QObject):
     def _drive(self) -> None:
         if self._stopped:
             return
-        # a nested Qt loop is already on this stack; replay the kick afterwards
-        if self.scheduler.is_running():
+        # a turn() is already on this stack; replay the kick afterwards.
+        # running() stays held for the whole session, including this gap.
+        if self.scheduler.in_turn():
             self._again = True
             return
         self._again = False
@@ -134,19 +135,20 @@ def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
     task = scheduler.spawn(lambda: main(host))
     app.aboutToQuit.connect(host.stop)
     try:
-        host.start()
-        if task.done():
-            # main returned during the first slice, so there is no window to run.
-            code = 0
-        else:
-            code = app.exec()
-            # closing the window wakes the app tealet from between turns.
-            # aboutToQuit has stopped the host, so drain that wake here.
-            if not task.done():
-                scheduler.turn()
-        if task.done():
-            task.result()
-        return int(code)
+        with scheduler.running():
+            host.start()
+            if task.done():
+                # main returned during the first slice, so there is no window to run.
+                code = 0
+            else:
+                code = app.exec()
+                # closing the window wakes the app tealet from between turns.
+                # aboutToQuit has stopped the host, so drain that wake here.
+                if not task.done():
+                    scheduler.turn()
+            if task.done():
+                task.result()
+            return int(code)
     finally:
         host.stop()
         scheduler.close()

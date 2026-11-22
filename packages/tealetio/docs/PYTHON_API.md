@@ -426,9 +426,10 @@ The result is how many bytes that call accepted. A short count is success.
 `IOWaiter`. The manager does not call stdlib `send` itself.
 `scheduler.io.sock_sendall_cb(sock, data, callback)` is that submit with
 `callback(result, exception)` on the scheduler through `call_on_scheduler`:
-inline on a live turn, otherwise queued and the driver woken. The pair is
-the one `send_all` reports (the full length on success, `(None, exception)`
-on failure). `SendBuffer` completes its waited send leg with this callback.
+the owner thread runs it immediately, and any other thread queues it and
+wakes the driver. The pair is the one `send_all` reports (the full length
+on success, `(None, exception)` on failure). `SendBuffer` completes its
+waited send leg with this callback.
 `drain`, `flush`, and `write_eof` use `sock_send_nowait` (`skip_success` +
 error callback).
 
@@ -805,7 +806,19 @@ bound and never creates one implicitly.
 
 `tealetio.get_running_scheduler()` returns the current scheduler only while it is
 actively driving work. It raises `RuntimeError` if no scheduler is running and
-never creates one implicitly.
+never creates one implicitly. `run()` and `arun()` are driving for their whole
+call, because they enter `scheduler.running()`. A host that waits between
+slices holds that same context for the whole loop:
+
+```python
+with scheduler.running():
+    deadline = scheduler.turn()
+```
+
+`turn()` outside it raises. `get_running_scheduler()` stays valid in the gaps.
+`scheduler.in_turn()` is true only while `turn()`, `run()`, or `arun()` is on
+the stack. The main tealet stays a scheduler task for the whole block, at
+driver priority, and this thread stays the owner.
 
 `tealetio.get_current()` returns the currently running `Task`, or `None`
 when the caller is outside a scheduler-owned tealet task. Asyncio tasks therefore
@@ -828,6 +841,8 @@ for the same operation; `spawn(...)` is the native tealetio spelling.
 Pass `eager_start=True`, or set it on the task factory, to run the new task
 before `spawn(...)` returns. This matches asyncio: eagerness applies only while
 the scheduler is already driving, and the child may finish during that call.
+`running()` counts, including the gaps between `turn()` slices: the caller
+parks, the child runs, and a park or finish switches back to that caller.
 When the child parks or finishes, the creator is next to run, so other queued
 work does not run in between. Nested eager spawn therefore resumes
 innermost-to-outermost. A per-spawn `eager_start=...` overrides the factory
@@ -843,8 +858,11 @@ matching asyncio's fire-and-forget warning. `CancelledError` is not logged.
 ## Scheduler drivers
 
 `run_until_complete(target)` drives until `target` is done.
-`run_forever()` drives until `stop()`. `Runner.run()` / `tealetio.run()` use
-`run_until_complete`.
+`run_forever()` drives until `stop()`. Each method has its own loop.
+A callable `target` is spawned before `running()` starts, while
+`is_running()` is still false, so an eager task factory queues it behind
+tasks that are already runnable. `Runner.run()` / `tealetio.run()` spawn
+the entry first, then call `run_until_complete`.
 
 `run()` / `arun()` stop at a **best-effort idle**: no runnable tasks, no
 timers, no `await_()` parks, and `not has_pending_operations()`. On
@@ -860,14 +878,31 @@ wait for that work.
 ## Scheduler Main Context
 
 `scheduler.main_context()` is the low-level boundary for direct scheduler task
-access from the process main tealet. It temporarily wraps the current main
-tealet with the scheduler's configured task class, so operations that transfer
-or inspect scheduler-owned tasks see a `Task`-shaped current tealet.
+access from the process main tealet. It wraps the current main tealet with the
+scheduler's configured task class, so operations that transfer or inspect
+scheduler-owned tasks see a `Task`-shaped current tealet. Entering it again
+for the same scheduler and task constructor keeps that tealet. A different
+constructor replaces it until that inner block exits.
 
-High-level driving APIs enter this context for you. That includes scheduler
-drivers such as `run()`, `run_forever()`, `run_until_complete(...)`, and
-their async counterparts, as well as `Runner.run()`, `Runner.close()`,
-`AsyncRunner.run()`, and `AsyncRunner.aclose()`.
+High-level driving APIs enter this context for you. `running()` holds it for
+the whole block, and `run()`, `run_forever()`, `run_until_complete(...)`, and
+their async counterparts enter it as well as `running()`.
+
+`Runner` and `AsyncRunner` are context managers, and `run()` requires that
+block. Entering the runner installs the main context and holds it until the
+block exits. `close()` and `aclose()`, called in that block, cancel leftovers
+and shut the executor down on that same main tealet. Leaving the block
+restores the previous factory. A second `run()` in the same block keeps the
+tealet from the first. `tealetio.run()`, `run_async()`, and
+`run_asyncio_in_tealet()` are that shape:
+
+```python
+with Runner() as runner:
+    try:
+        return runner.run(entry)
+    finally:
+        runner.close()
+```
 
 `run` / `arun` / `run_forever` / `arun_forever` / `run_until_complete` /
 `arun_until_complete` bound each scheduler batch with `yield_every`. After
@@ -882,11 +917,12 @@ Async hosts still `asyncio.sleep(0)` after that poll so asyncio can run.
 ## Hosting the driver
 
 `run()` parks the thread inside the proactor. A GUI loop such as
-`QApplication.exec` needs that same thread. `turn()` is the slice a host
-runs when its own loop wakes up:
+`QApplication.exec` needs that same thread. `turn()` is one slice of that
+same driver, inside `running()`:
 
 ```python
-deadline = scheduler.turn()
+with scheduler.running():
+    deadline = scheduler.turn()
 ```
 
 `turn` polls, runs one ready batch, and polls again when that batch ran a
@@ -908,13 +944,17 @@ scheduler.set_driver_wakeup(host.notify)  # any thread; must not call turn()
 
 The callback is how a completion thread asks for another slice. Post it
 onto the host thread (a queued Qt signal, `loop.call_soon_threadsafe`).
-`turn()` and `run()` share the driver flag, so one cannot start while the
-other is on the stack. A wake on that driving thread is not delivered:
-parking the driver at the start of the slice would otherwise schedule
-another slice forever, and the returned deadline already says when to come
-back. The proactor wake used by `run()` still happens; leaving the callback
-unset keeps `run()` as it was. `yield_every` on `run()` / `arun()` is the
-batch cap when the caller wants shorter slices inside the blocking driver.
+`turn()` requires `running()`, and `run()` enters that context itself, so
+the two cannot nest. A host holds `scheduler.running()` for the whole
+external loop. `in_turn()` is true only while a slice is on the stack. A
+wake on the owner thread during that slice is not delivered: parking the
+driver at the start of the slice would otherwise schedule another slice
+forever, and the returned deadline already says when to come back. Between
+slices the same thread does deliver the wake, so a spawn there asks the
+host for another `turn()`. The proactor wake used by `run()` still happens;
+leaving the callback unset keeps `run()` as it was. `yield_every` on
+`run()` / `arun()` is the batch cap when the caller wants shorter slices
+inside the blocking driver.
 
 `tealet_qt.run` in `packages/tealetio/examples/qt/` is that host. It spawns
 one tealet, `application`, and calls `exec`. It uses `Scheduler()`, whose
@@ -939,12 +979,16 @@ drain no-ops.
 `call_soon` queues for the next drain and copies context. It does not wake a
 parked driver. `call_soon_threadsafe` is that queue from any thread: it copies
 context and always wakes, and the callback still runs on a later drain.
-`call_on_scheduler` is the worker-thread hop. It does not copy context. On a
-live turn (a task or this drain) it runs on the current stack; otherwise it
-queues and wakes. A completion callback that needs a tealet uses
-`call_on_scheduler`, not `call_soon_threadsafe`. The owner thread alone is
-not a live turn: hosted `arun` parked in asyncio still queues, so the
-callback does not re-enter on the asyncio stack.
+`call_on_scheduler` is the worker-thread hop. It does not copy context. The
+owner thread runs the callback on the current stack, including while hosted
+`arun` is parked in asyncio and while a same-thread completion runs inside
+the driver wait. Any other thread queues the callback and wakes the driver.
+When the owner runs the callback while the driver is blocked in that wait,
+the wait is broken, so a `PulseEvent.set` in the callback is serviced when
+the wait returns. A completion callback that needs a tealet uses
+`call_on_scheduler`, not `call_soon_threadsafe`. The callback may queue
+runnable work. It must not switch tealets from an asyncio stack or from
+inside the driver wait.
 
 Callbacks are for **simple work**. They must not block waiting for another
 event, future, or remaining timer/threadsafe callback: the drain tealet is

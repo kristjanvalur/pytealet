@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from types import FrameType
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
@@ -46,6 +47,8 @@ class BaseRunner(Generic[SchedulerT]):
         self._initialized = False
         self._previous_scheduler: scheduler_module.BaseScheduler | None = None
         self._interrupt_count = 0
+        self._cm_depth = 0
+        self._main_context: AbstractContextManager[None] | None = None
 
     def get_scheduler(self) -> SchedulerT:
         """Return the runner's scheduler, creating it on first access."""
@@ -182,6 +185,45 @@ class BaseRunner(Generic[SchedulerT]):
         if self._interrupt_count > 0:
             raise KeyboardInterrupt()
 
+    def _require_runner_context(self) -> None:
+        if self._cm_depth == 0:
+            raise RuntimeError("runner must be used as a context manager")
+
+    def _enter_main_context(self) -> None:
+        # the runner `with` block holds this until __exit__. run and close
+        # share that tealet. exiting inside run() would rebuild it first.
+        if self._main_context is not None:
+            return
+        scheduler = self._require_scheduler()
+        context = scheduler.main_context()
+        context.__enter__()
+        self._main_context = context
+
+    def _exit_main_context(self) -> None:
+        context = self._main_context
+        if context is None:
+            return
+        self._main_context = None
+        context.__exit__(None, None, None)
+
+    def _shutdown_scheduler(self, scheduler: SchedulerT | None) -> None:
+        if scheduler is None:
+            return
+        # outside the runner `with`, this close owns the context. inside it,
+        # __exit__ leaves the context after shutdown.
+        release_context = self._cm_depth == 0
+        if release_context:
+            self._enter_main_context()
+        try:
+            tasks = self._shutdown_scheduler_tasks(scheduler)
+            shutdown_group = scheduler_module.gather(*tasks, return_exceptions=True)
+            scheduler.run_until_complete(shutdown_group)
+            executor_shutdown = scheduler.shutdown_default_executor()
+            scheduler.run_until_complete(executor_shutdown)
+        finally:
+            if release_context:
+                self._exit_main_context()
+
 
 def run(
     entry,
@@ -192,60 +234,82 @@ def run(
     debug: bool | None = None,
     handle_sigint: bool = True,
 ):
-    """Convenience helper that runs one entry under a temporary Runner."""
+    """Run one entry, then cancel leftovers and shut the scheduler down.
 
-    runner = Runner(scheduler_factory=scheduler_factory, debug=debug, handle_sigint=handle_sigint)
-    try:
-        return runner.run(entry, context=context)
-    finally:
-        runner.close()
+    The temporary runner is a context manager. Its ``with`` block holds one
+    main context for ``run`` and ``close``.
+    """
+
+    with Runner(scheduler_factory=scheduler_factory, debug=debug, handle_sigint=handle_sigint) as runner:
+        try:
+            return runner.run(entry, context=context)
+        finally:
+            runner.close()
 
 
 class Runner(BaseRunner[scheduler_module.SyncSchedulerDrivingAPI]):
-    """Run scheduler-backed entries from synchronous code without asyncio."""
+    """Run scheduler-backed entries from synchronous code without asyncio.
+
+    Use the runner as a context manager. The ``with`` block holds the
+    scheduler main context. ``run`` drives entries and ``close`` cancels
+    leftovers on that tealet. Leaving the block restores the previous factory.
+    """
 
     default_factory = scheduler_module.Scheduler
 
     def close(self) -> None:
-        """Shut down pending scheduler tasks and release runner resources."""
+        """Cancel leftovers and release the scheduler.
+
+        Inside the runner ``with`` block the main context stays until that
+        block exits.
+        """
 
         if self._closed:
             return
         scheduler = self._scheduler
         try:
-            if scheduler is not None:
-                with scheduler.main_context():
-                    tasks = self._shutdown_scheduler_tasks(scheduler)
-                    shutdown_group = scheduler_module.gather(*tasks, return_exceptions=True)
-                    scheduler.run_until_complete(shutdown_group)
-                    executor_shutdown = scheduler.shutdown_default_executor()
-                    scheduler.run_until_complete(executor_shutdown)
+            self._shutdown_scheduler(scheduler)
         finally:
             self._finalize_close(scheduler)
 
     def run(self, entry, /, *, context: contextvars.Context | None = None):
-        """Run one callable or Future to completion using this runner."""
+        """Run one callable or Future to completion.
+
+        Requires the runner context manager. ``close`` cancels leftovers
+        before that block leaves the main context.
+        """
 
         self._lazy_init()
+        self._require_runner_context()
         scheduler = self._scheduler
         assert scheduler is not None
         run_context = self._resolve_context(context)
-        with scheduler.main_context():
-            target = self._target_from_entry(entry, run_context)
-            sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
-            self._interrupt_count = 0
+        target = self._target_from_entry(entry, run_context)
+        sigint_handler = self._install_sigint_handler(target, cast(scheduler_module.BaseScheduler, scheduler))
+        self._interrupt_count = 0
+        try:
             try:
-                try:
-                    return scheduler.run_until_complete(target)
-                except task_module.CancelledError:
-                    self._raise_keyboard_interrupt_if_requested()
-                    raise
-            finally:
-                self._restore_sigint_handler(sigint_handler)
+                return scheduler.run_until_complete(target)
+            except task_module.CancelledError:
+                self._raise_keyboard_interrupt_if_requested()
+                raise
+        finally:
+            self._restore_sigint_handler(sigint_handler)
 
     def __enter__(self) -> Runner:
+        """Hold the scheduler main context for ``run`` and ``close``."""
+
         self._lazy_init()
+        if self._cm_depth == 0:
+            self._enter_main_context()
+        self._cm_depth += 1
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.close()
+        try:
+            if self._cm_depth == 1:
+                self.close()
+        finally:
+            self._cm_depth -= 1
+            if self._cm_depth == 0:
+                self._exit_main_context()

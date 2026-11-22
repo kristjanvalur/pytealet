@@ -473,8 +473,9 @@ class TestPulseEvent:
             seen.append(f"expired={tm.expired()}")
 
         s.spawn(waiter)
-        s.turn()
-        assert pulse._waiters
+        with s.running():
+            s.turn()
+            assert pulse._waiters
 
         def deliver() -> None:
             state["ready"] = True
@@ -815,12 +816,13 @@ class TestTimeoutKeepsContext:
                     raise
 
         task = s.spawn(waiter)
-        s.turn()
-        assert gate._waiters
-        # throw from a scheduler turn so the handler can park again
-        s.call_soon(task.throw, cancel)
-        s.turn()
-        assert gate._waiters
+        with s.running():
+            s.turn()
+            assert gate._waiters
+            # throw from a scheduler turn so the handler can park again
+            s.call_soon(task.throw, cancel)
+            s.turn()
+            assert gate._waiters
 
         s.now = 11.0
         s.run()
@@ -858,14 +860,15 @@ class TestTimeoutKeepsContext:
                         raise
 
         task = s.spawn(waiter)
-        s.turn()
-        assert gate._waiters
+        with s.running():
+            s.turn()
+            assert gate._waiters
 
-        s.now = 10.0
-        s.turn()
-        assert scopes["outer"].expired() is True
-        assert scopes["inner"].expired() is False
-        assert gate._waiters
+            s.now = 10.0
+            s.turn()
+            assert scopes["outer"].expired() is True
+            assert scopes["inner"].expired() is False
+            assert gate._waiters
 
         s.now = 20.0
         s.run()
@@ -897,11 +900,12 @@ class TestTimeoutKeepsContext:
                     raise
 
         task = s.spawn(waiter)
-        s.turn()
-        assert gate._waiters
-        s.call_soon(task.throw, error)
-        s.turn()
-        assert gate._waiters
+        with s.running():
+            s.turn()
+            assert gate._waiters
+            s.call_soon(task.throw, error)
+            s.turn()
+            assert gate._waiters
 
         s.now = 11.0
         s.run()
@@ -930,8 +934,9 @@ class TestTimeoutKeepsContext:
                     raise RuntimeError("close failed")
 
         task = s.spawn(waiter)
-        s.turn()
-        assert gate._waiters
+        with s.running():
+            s.turn()
+            assert gate._waiters
 
         s.now = 11.0
         s.run()

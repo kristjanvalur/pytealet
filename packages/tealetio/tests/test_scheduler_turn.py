@@ -32,20 +32,21 @@ def _drive_until(scheduler, done, timeout_s: float = 3.0) -> None:
     woke = threading.Event()
     scheduler.set_driver_wakeup(woke.set)
     end = time.monotonic() + timeout_s
-    while time.monotonic() < end:
-        woke.clear()
-        deadline = scheduler.turn()
-        if done():
-            return
-        if deadline is not None and deadline <= scheduler.time():
-            continue
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            break
-        if deadline is None:
-            woke.wait(remaining)
-        else:
-            woke.wait(min(remaining, max(0.0, deadline - scheduler.time())))
+    with scheduler.running():
+        while time.monotonic() < end:
+            woke.clear()
+            deadline = scheduler.turn()
+            if done():
+                return
+            if deadline is not None and deadline <= scheduler.time():
+                continue
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            if deadline is None:
+                woke.wait(remaining)
+            else:
+                woke.wait(min(remaining, max(0.0, deadline - scheduler.time())))
     if not done():
         raise AssertionError("host timed out before the tealet finished")
 
@@ -55,7 +56,8 @@ class TestTurn:
         scheduler = BasicScheduler()
         set_scheduler(scheduler)
         try:
-            assert scheduler.turn() is None
+            with scheduler.running():
+                assert scheduler.turn() is None
         finally:
             set_scheduler(None)
 
@@ -63,8 +65,9 @@ class TestTurn:
         scheduler = _PollCountingScheduler()
         set_scheduler(scheduler)
         try:
-            assert scheduler.turn() is None
-            assert scheduler.polls == 1
+            with scheduler.running():
+                assert scheduler.turn() is None
+                assert scheduler.polls == 1
         finally:
             set_scheduler(None)
 
@@ -74,9 +77,10 @@ class TestTurn:
         seen: list[int] = []
         try:
             scheduler.spawn(lambda: seen.append(1))
-            scheduler.turn()
-            assert seen == [1]
-            assert scheduler.polls == 2
+            with scheduler.running():
+                scheduler.turn()
+                assert seen == [1]
+                assert scheduler.polls == 2
         finally:
             set_scheduler(None)
 
@@ -85,8 +89,9 @@ class TestTurn:
         set_scheduler(scheduler)
         try:
             scheduler.call_soon(lambda: None)
-            scheduler.turn()
-            assert scheduler.polls == 2
+            with scheduler.running():
+                scheduler.turn()
+                assert scheduler.polls == 2
         finally:
             set_scheduler(None)
 
@@ -95,8 +100,9 @@ class TestTurn:
         set_scheduler(scheduler)
         try:
             scheduler.call_later(0, lambda: None)
-            scheduler.turn()
-            assert scheduler.polls == 2
+            with scheduler.running():
+                scheduler.turn()
+                assert scheduler.polls == 2
         finally:
             set_scheduler(None)
 
@@ -110,18 +116,19 @@ class TestTurn:
         try:
             wakes: list[int] = []
             scheduler.set_driver_wakeup(lambda: wakes.append(1))
-            scheduler.spawn(sleeper)
-            assert len(wakes) == 1
-            started = scheduler.time()
-            deadline = scheduler.turn()
-            # parking the driver at the start of the slice must not ask for another
-            assert len(wakes) == 1
-            assert deadline is not None
-            assert started + 9.5 <= deadline <= started + 10.5
-            again = scheduler.turn()
-            assert len(wakes) == 1
-            assert again is not None
-            assert again > scheduler.time()
+            with scheduler.running():
+                scheduler.spawn(sleeper)
+                assert len(wakes) == 1
+                started = scheduler.time()
+                deadline = scheduler.turn()
+                # parking the driver at the start of the slice must not ask for another
+                assert len(wakes) == 1
+                assert deadline is not None
+                assert started + 9.5 <= deadline <= started + 10.5
+                again = scheduler.turn()
+                assert len(wakes) == 1
+                assert again is not None
+                assert again > scheduler.time()
         finally:
             set_scheduler(None)
 
@@ -136,16 +143,17 @@ class TestTurn:
                 sleep(0)
 
         try:
-            scheduler.spawn(spin)
-            first = scheduler.turn()
-            assert steps == [0]
-            assert first is not None
-            assert first <= scheduler.time()
-            for _ in range(8):
-                if len(steps) == 4:
-                    break
-                scheduler.turn()
-            assert steps == [0, 1, 2, 3]
+            with scheduler.running():
+                scheduler.spawn(spin)
+                first = scheduler.turn()
+                assert steps == [0]
+                assert first is not None
+                assert first <= scheduler.time()
+                for _ in range(8):
+                    if len(steps) == 4:
+                        break
+                    scheduler.turn()
+                assert steps == [0, 1, 2, 3]
         finally:
             set_scheduler(None)
 
@@ -155,12 +163,13 @@ class TestTurn:
         wakes: list[int] = []
         scheduler.set_driver_wakeup(lambda: wakes.append(1))
         try:
-            scheduler.spawn(lambda: None)
-            assert len(wakes) == 1
-            scheduler.call_soon(lambda: None)
-            assert len(wakes) == 1
-            scheduler.call_soon_threadsafe(lambda: None)
-            assert len(wakes) == 2
+            with scheduler.running():
+                scheduler.spawn(lambda: None)
+                assert len(wakes) == 1
+                scheduler.call_soon(lambda: None)
+                assert len(wakes) == 1
+                scheduler.call_soon_threadsafe(lambda: None)
+                assert len(wakes) == 2
         finally:
             set_scheduler(None)
 
@@ -197,7 +206,8 @@ class TestTurn:
                     set_scheduler(None)
 
             scheduler.set_driver_wakeup(reenter)
-            scheduler.turn()
+            with scheduler.running():
+                scheduler.turn()
             assert errors
             assert "Scheduler already running" in str(errors[0])
         finally:
@@ -305,9 +315,10 @@ class TestTurnIo:
         try:
             scheduler.spawn(client)
             end = time.monotonic() + 3
-            while got != [b"pong"] and time.monotonic() < end:
-                scheduler.turn()
-                time.sleep(0.01)
+            with scheduler.running():
+                while got != [b"pong"] and time.monotonic() < end:
+                    scheduler.turn()
+                    time.sleep(0.01)
             assert got == [b"pong"]
             assert any(isinstance(exc, RuntimeError) for exc in errors)
         finally:

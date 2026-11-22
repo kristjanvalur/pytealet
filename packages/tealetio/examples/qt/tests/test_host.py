@@ -49,8 +49,9 @@ def _run(app, start) -> QtHost:
 
     QTimer.singleShot(0, begin)
     try:
-        host.start()
-        app.exec()
+        with scheduler.running():
+            host.start()
+            app.exec()
     finally:
         host.stop()
         scheduler.close()
@@ -298,7 +299,8 @@ def test_threaded_selector_proactor_is_accepted(app):
     host = QtHost(scheduler)
     set_scheduler(scheduler)
     try:
-        host.start()
+        with scheduler.running():
+            host.start()
     finally:
         host.stop()
         scheduler.close()

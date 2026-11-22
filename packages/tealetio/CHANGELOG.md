@@ -21,9 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ``sock_sendall_cb``, ``sock_shutdown_cb``, and ``sock_close_cb`` submit
   ``send_all``, ``shutdown``, and ``close_socket`` and run
   ``callback(result, exception)`` on the scheduler through
-  ``call_on_scheduler``. The callback runs inline on a live turn, and is
-  queued with a driver wake otherwise. ``SendBuffer`` completes its waited
-  send leg with ``sock_sendall_cb``. ``sock_sendall``, ``sock_shutdown``,
+  ``call_on_scheduler``. The owner thread runs that callback immediately.
+  Any other thread queues it and wakes the driver. ``SendBuffer`` completes
+  its waited send leg with ``sock_sendall_cb``. ``sock_sendall``,
+  ``sock_shutdown``,
   and ``sock_close`` stay for callers that park or close without waiting.
 - ``Proactor.accept`` and ``Proactor.accept_many`` take keyword-only
   ``tcp_nodelay`` (default false). It disables Nagle on each accepted
@@ -36,6 +37,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-entering ``main_context()`` for the same scheduler and task
+  constructor keeps the main tealet. ``Runner`` and ``AsyncRunner`` are
+  used as context managers: the ``with`` block holds one such context,
+  and ``run`` plus ``close`` / ``aclose`` share that tealet. Leaving the
+  block restores the previous factory. ``tealetio.run()``, ``run_async()``,
+  and ``run_asyncio_in_tealet()`` are that ``with`` block.
+- ``scheduler.running()`` holds the same driver context as ``run()``.
+  The main tealet uses the scheduler task factory at driver priority,
+  ``is_running()`` stays true, and this thread stays the owner, including
+  while the host waits between slices. ``turn()`` requires that context.
+  ``run()``, ``run_forever()``, and ``arun()`` enter it themselves.
+  ``run_until_complete`` creates a callable entry first, while
+  ``is_running()`` is still false, then enters ``running()`` and loops
+  until that entry is done. An eager task factory therefore queues the
+  entry behind work that is already runnable. ``Runner.run()`` creates
+  its entry the same way before calling ``run_until_complete``.
+  ``in_turn()`` is true only
+  while ``turn()``, ``run()``, or ``arun()`` is on the stack. An eager
+  spawn between slices runs immediately and returns to the caller. The Qt
+  host holds ``running()`` for its ``exec`` loop.
+- ``stop()``, arming a timer, and queueing a runnable task wake the driver
+  from another thread, from the owner thread between ``turn()`` slices, and
+  from the owner thread while the driver is blocked in its wait. During a
+  slice the owner thread reads those queues before it parks again. A host
+  that drives with ``turn()`` receives ``set_driver_wakeup`` for those
+  wakes, including a spawn on the host thread between slices.
+- ``call_on_scheduler`` runs the callback on the owner thread and queues it
+  from any other thread. The owner is the thread inside ``running()``,
+  ``run()``, or ``arun()``, including the gaps between slices. It does not
+  copy context. When the driver is blocked in its wait, the owner-thread
+  callback also breaks that wait, so a ``PulseEvent.set`` inside the
+  callback is serviced as soon as the wait returns. Hosted ``arun`` runs
+  the callback on the asyncio stack. That callback may queue runnable work
+  and must not switch tealets there.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.
@@ -363,10 +398,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selector proactors. Do not assign the returned handle again: the
   callback may already have cleared it.
 - ``call_on_scheduler(callback, *args)`` runs a worker callback on the
-  scheduler thread and does not copy context. On a live turn (a task or
-  callback drain) it runs on the current stack; otherwise it is queued and
-  the driver is woken. The owner thread alone is not a live turn: hosted
-  ``arun`` parked in asyncio still queues.
+  scheduler thread and does not copy context. The owner thread runs it on
+  the current stack. Any other thread queues it and wakes the driver. When
+  the driver is blocked, the owner-thread callback also breaks that wait.
 - ``Proactor.set_operation_callback(handle, callback)`` replaces the
   callback on a live operation, on both the uring and selector proactors.
   A result already in flight keeps the old callback; later ones use the
@@ -419,9 +453,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is not cancellable; delayed work stays on the timer heap via ``call_later``
   / ``call_at``. Both enqueue with ``deque.append``. ``call_soon`` does not
   ``break_wait``. ``call_soon_threadsafe`` does. ``stop()``,
-  ``_make_runnable``, and timer enqueue do only when the owner thread is
-  not in a live turn (a user tealet or callback drain). Hosted ``arun``
-  parked on that same thread still gets the kick. There is one
+  ``_make_runnable``, and timer enqueue wake when the driver is blocked
+  in its wait, and when the caller is not the owner thread. There is one
   ``_break_wait`` (always safe from any thread).
 - ``RecvBufferPoolCache`` is a FIFO (``append`` / ``popleft``), not a
   stack. A still-armed pool is queued too and the ring stays registered.
