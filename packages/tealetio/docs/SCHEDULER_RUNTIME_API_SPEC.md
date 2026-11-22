@@ -234,9 +234,10 @@ Semantics:
   current main tealet is wrapped using this scheduler's configured task constructor.
   With the default factory that wrapper is a `Task`; with a priority
   factory it may be a `PriorityTask` or another scheduler-compatible subclass.
-- The context is reentrant for the same scheduler. Entering it again while the
-  same scheduler factory is active is a no-op, and exiting restores the previous
-  low-level tealet factory.
+- The context is reentrant for the same scheduler and task constructor.
+  Entering it again does not replace the main tealet. A different constructor
+  installs that factory until the inner block exits. The outermost exit
+  restores the previous low-level tealet factory.
 - Code running inside a scheduler-owned `Task` already has the right
   scheduler shape. Code running from the raw process main tealet must enter
   `with scheduler.main_context():` before directly cancelling, throwing into,
@@ -248,10 +249,22 @@ Semantics:
   owner thread for the whole block. `run()`, `run_forever()`,
   `run_until_complete(...)`, and the async entry points enter `running()`.
   `turn()` requires that context and does not enter it again, so the main
-  tealet stays a scheduler task between slices. `Runner.run()`,
-  `Runner.close()`, `AsyncRunner.run()`, and `AsyncRunner.aclose()` also
-  enter `main_context()` while creating and draining their main and
-  shutdown tasks.
+  tealet stays a scheduler task between slices. Those drive methods also
+  enter `main_context()` themselves; re-entry keeps the same tealet.
+- `Runner` and `AsyncRunner` are context managers. `run()` requires that
+  block. Entering the runner holds one `main_context()` until the block
+  exits. `close()` / `aclose()` cancel leftovers on that same main tealet,
+  and leaving the block restores the previous factory. Repeated `run()`
+  calls in one block keep the tealet. `run()`, `run_async()`, and
+  `run_asyncio_in_tealet()` are:
+
+  ```python
+  with Runner() as runner:
+      try:
+          return runner.run(entry)
+      finally:
+          runner.close()
+  ```
 - Priority-based schedulers give the driving main tealet an internal
   infinity priority for the whole `running()` block, including the gaps
   between `turn()` slices. This keeps real runnable work ahead of the
@@ -580,7 +593,11 @@ Return behavior:
 
 - Creates a scheduler using `scheduler_factory` (or default scheduler creator).
 - Installs scheduler as current for runtime scope.
-- Runs entry to completion.
+- Requires the runner context manager. The `with` block holds the scheduler
+  main context, including across repeated `run()` calls.
+- Runs entry to completion inside that block.
+- `close()` drains cancelled tasks before the block leaves the context.
+  Leaving the block restores the previous tealet factory.
 - Ensures deterministic cleanup:
   - pending scheduler waits resolved/cancelled
   - scheduler running marker cleared
@@ -593,7 +610,11 @@ Return behavior:
 - Creates a scheduler using `scheduler_factory` (or default async scheduler
   creator).
 - Installs scheduler as current for runtime scope.
-- Runs entry to completion inside the active asyncio task.
+- Requires the runner context manager. The `async with` block holds the
+  scheduler main context, including across repeated `run()` calls.
+- Runs entry to completion inside the active asyncio task and that block.
+- `aclose()` drains cancelled tasks before the block leaves the context.
+  Leaving the block restores the previous tealet factory.
 - Uses `aclose()` for deterministic async cleanup, and supports
   `async with AsyncRunner() as runner: ...` as the async counterpart to
   `with Runner() as runner: ...`. `AsyncRunner` deliberately follows Python's

@@ -875,15 +875,31 @@ wait for that work.
 ## Scheduler Main Context
 
 `scheduler.main_context()` is the low-level boundary for direct scheduler task
-access from the process main tealet. It temporarily wraps the current main
-tealet with the scheduler's configured task class, so operations that transfer
-or inspect scheduler-owned tasks see a `Task`-shaped current tealet.
+access from the process main tealet. It wraps the current main tealet with the
+scheduler's configured task class, so operations that transfer or inspect
+scheduler-owned tasks see a `Task`-shaped current tealet. Entering it again
+for the same scheduler and task constructor keeps that tealet. A different
+constructor replaces it until that inner block exits.
 
 High-level driving APIs enter this context for you. `running()` holds it for
 the whole block, and `run()`, `run_forever()`, `run_until_complete(...)`, and
-their async counterparts enter `running()`. `Runner.run()`, `Runner.close()`,
-`AsyncRunner.run()`, and `AsyncRunner.aclose()` enter it while creating and
-draining their main and shutdown tasks.
+their async counterparts enter it as well as `running()`.
+
+`Runner` and `AsyncRunner` are context managers, and `run()` requires that
+block. Entering the runner installs the main context and holds it until the
+block exits. `close()` and `aclose()`, called in that block, cancel leftovers
+and shut the executor down on that same main tealet. Leaving the block
+restores the previous factory. A second `run()` in the same block keeps the
+tealet from the first. `tealetio.run()`, `run_async()`, and
+`run_asyncio_in_tealet()` are that shape:
+
+```python
+with Runner() as runner:
+    try:
+        return runner.run(entry)
+    finally:
+        runner.close()
+```
 
 `run` / `arun` / `run_forever` / `arun_forever` / `run_until_complete` /
 `arun_until_complete` bound each scheduler batch with `yield_every`. After

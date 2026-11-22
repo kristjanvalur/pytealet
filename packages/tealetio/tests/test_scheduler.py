@@ -641,6 +641,27 @@ class TestSchedulerAccessors:
 
         assert _tealet.get_tealet_factory() is original_factory
 
+    def test_main_context_reentry_keeps_the_same_main_tealet(self):
+        s = _new_scheduler(lambda: DefaultTaskFactory(task_constructor=PriorityTask))
+        with s.main_context():
+            main = _tealet.main()
+            with s.main_context():
+                assert _tealet.main() is main
+            assert _tealet.main() is main
+
+    def test_main_context_installs_a_changed_task_constructor(self):
+        s = _new_scheduler()
+        with s.main_context():
+            first = _tealet.main()
+            assert type(first) is Task
+            s.set_task_factory(DefaultTaskFactory(task_constructor=PriorityTask))
+            with s.main_context():
+                second = _tealet.main()
+                assert isinstance(second, PriorityTask)
+                assert second is not first
+            restored = _tealet.main()
+            assert type(restored) is Task
+
     def test_reschedule_rejects_non_runnable_task(self):
         s = _new_scheduler()
         set_scheduler(s)

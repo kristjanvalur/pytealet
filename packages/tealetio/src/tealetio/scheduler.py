@@ -537,7 +537,7 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.running():
+        with self.main_context(), self.running():
             self._before_arun()
             with self._slice():
                 while not self._arun_should_terminate():
@@ -552,7 +552,7 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.running():
+        with self.main_context(), self.running():
             self._before_arun()
             self._stopping = False
             try:
@@ -576,7 +576,7 @@ class BaseDrivingMixin:
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
-        with self.running():
+        with self.main_context(), self.running():
             if isinstance(future, _tasks.Future):
                 target: _tasks.Future[T] = future
                 if isinstance(target, _tasks.Task) and target.get_scheduler() is not self:
@@ -1532,6 +1532,8 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         Installs this scheduler's task factory on the main tealet, gives
         that tealet driver priority, and records this thread as the owner.
+        Entering ``main_context`` again for the same factory does not
+        replace that tealet.
         ``is_running()`` and ``get_running_scheduler()`` stay true for the
         whole block, including while the host waits between slices. The
         main tealet stays a scheduler task across those gaps, so an eager
@@ -1686,7 +1688,12 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
             )
 
     def main_context(self) -> AbstractContextManager[None]:
-        """Use this scheduler's task factory for the current main tealet wrapper."""
+        """Use this scheduler's task factory for the current main tealet.
+
+        Re-entering the same scheduler and task constructor keeps that
+        tealet. The outermost exit restores the previous factory.
+        """
+
         return _tasks.scheduler_tealet_factory(self)
 
     def close(self) -> None:

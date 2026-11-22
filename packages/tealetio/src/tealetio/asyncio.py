@@ -555,7 +555,12 @@ class AsyncScheduler(AsyncDrivingMixin, BaseScheduler, AsyncSchedulerDrivingAPI)
 
 
 class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
-    """Run scheduler-backed entries from within an existing asyncio task."""
+    """Run scheduler-backed entries from within an existing asyncio task.
+
+    Use the runner as a context manager. The ``async with`` block holds the
+    scheduler main context. ``run`` drives entries and ``aclose`` cancels
+    leftovers on that tealet. Leaving the block restores the previous factory.
+    """
 
     default_factory = AsyncScheduler
 
@@ -566,50 +571,75 @@ class AsyncRunner(BaseRunner[AsyncSchedulerDrivingAPI]):
         return None
 
     async def __aenter__(self) -> AsyncRunner:
+        """Hold the scheduler main context for ``run`` and ``aclose``."""
+
         self._lazy_init()
+        if self._cm_depth == 0:
+            self._enter_main_context()
+        self._cm_depth += 1
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        await self.aclose()
+        try:
+            if self._cm_depth == 1:
+                await self.aclose()
+        finally:
+            self._cm_depth -= 1
+            if self._cm_depth == 0:
+                self._exit_main_context()
 
     async def aclose(self) -> None:
-        """Shut down pending scheduler tasks and release runner resources."""
+        """Cancel leftovers and release the scheduler.
+
+        Inside the runner ``async with`` block the main context stays until
+        that block exits.
+        """
 
         if self._closed:
             return
         scheduler = self._scheduler
+        release_context = self._cm_depth == 0
         try:
             if scheduler is not None:
                 scheduler.bind_loop(_asyncio.get_running_loop())
-                with scheduler.main_context():
+                if release_context:
+                    self._enter_main_context()
+                try:
                     tasks = self._shutdown_scheduler_tasks(scheduler)
                     async_scheduler = scheduler
                     shutdown_group = gather(*tasks, return_exceptions=True)
                     await async_scheduler.arun_until_complete(shutdown_group)
                     executor_shutdown = scheduler.shutdown_default_executor()
                     await async_scheduler.arun_until_complete(executor_shutdown)
+                finally:
+                    if release_context:
+                        self._exit_main_context()
         finally:
             self._finalize_close(scheduler)
 
     async def run(self, entry, /, *, context: contextvars.Context | None = None):
-        """Run one callable or Future to completion using this async runner."""
+        """Run one callable or Future to completion.
+
+        Requires the runner context manager. ``aclose`` cancels leftovers
+        before that block leaves the main context.
+        """
 
         self._lazy_init()
+        self._require_runner_context()
         scheduler = self._require_scheduler()
         scheduler.bind_loop(_asyncio.get_running_loop())
         run_context = self._resolve_context(context)
-        with scheduler.main_context():
-            target = self._target_from_entry(entry, run_context)
-            sigint_handler = self._install_sigint_handler(target, cast(BaseScheduler, scheduler))
-            self._interrupt_count = 0
+        target = self._target_from_entry(entry, run_context)
+        sigint_handler = self._install_sigint_handler(target, cast(BaseScheduler, scheduler))
+        self._interrupt_count = 0
+        try:
             try:
-                try:
-                    return await scheduler.arun_until_complete(target)
-                except CancelledError:
-                    self._raise_keyboard_interrupt_if_requested()
-                    raise
-            finally:
-                self._restore_sigint_handler(sigint_handler)
+                return await scheduler.arun_until_complete(target)
+            except CancelledError:
+                self._raise_keyboard_interrupt_if_requested()
+                raise
+        finally:
+            self._restore_sigint_handler(sigint_handler)
 
 
 async def run_async(
@@ -621,18 +651,22 @@ async def run_async(
     debug: bool | None = None,
     handle_sigint: bool = True,
 ):
-    """Convenience helper that runs one entry under a temporary AsyncRunner."""
+    """Run one entry, then cancel leftovers and shut the scheduler down.
 
-    runner = AsyncRunner(
+    The temporary runner is a context manager. Its ``async with`` block holds
+    one main context for ``run`` and ``aclose``.
+    """
+
+    async with AsyncRunner(
         scheduler_factory=scheduler_factory,
         context=context,
         debug=debug,
         handle_sigint=handle_sigint,
-    )
-    try:
-        return await runner.run(entry)
-    finally:
-        await runner.aclose()
+    ) as runner:
+        try:
+            return await runner.run(entry)
+        finally:
+            await runner.aclose()
 
 
 def run_in_asyncio(
@@ -723,7 +757,8 @@ def run_asyncio_in_tealet(
             wrapped_entry(), context=run_context, loop_factory=tealet_loop_factory, debug=debug
         )
 
-    try:
-        return tealet_runner.run(run_inside_tealet)
-    finally:
-        tealet_runner.close()
+    with tealet_runner:
+        try:
+            return tealet_runner.run(run_inside_tealet)
+        finally:
+            tealet_runner.close()

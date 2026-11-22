@@ -87,12 +87,29 @@ class _SchedulerTealetFactory:
         return self._task_constructor(self.scheduler)
 
 
+def _same_main_factory(current_factory: object, scheduler: BaseScheduler) -> bool:
+    # set_tealet_factory rebuilds this thread's main wrapper. the same
+    # scheduler and task constructor must not be installed again.
+    if not isinstance(current_factory, _SchedulerTealetFactory):
+        return False
+    if current_factory.scheduler is not scheduler:
+        return False
+    constructor = scheduler.get_task_factory().task_constructor
+    return current_factory._task_constructor is constructor
+
+
 @contextmanager
 def scheduler_tealet_factory(scheduler: BaseScheduler):
-    """Use `scheduler` to construct low-level tealets in this context."""
+    """Use `scheduler` to construct the current thread's main tealet.
+
+    Re-entering the same scheduler and task constructor is a no-op: the
+    main tealet object stays, and the outermost exit restores the previous
+    factory. A different constructor installs that factory and restores the
+    previous one on exit.
+    """
 
     current_factory = _tealet.get_tealet_factory()
-    if isinstance(current_factory, _SchedulerTealetFactory) and current_factory.scheduler is scheduler:
+    if _same_main_factory(current_factory, scheduler):
         yield
         return
 

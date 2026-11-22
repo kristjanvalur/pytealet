@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-entering ``main_context()`` for the same scheduler and task
+  constructor keeps the main tealet. ``Runner`` and ``AsyncRunner`` are
+  used as context managers: the ``with`` block holds one such context,
+  and ``run`` plus ``close`` / ``aclose`` share that tealet. Leaving the
+  block restores the previous factory. ``tealetio.run()``, ``run_async()``,
+  and ``run_asyncio_in_tealet()`` are that ``with`` block.
 - ``scheduler.running()`` holds the same driver context as ``run()``.
   The main tealet uses the scheduler task factory at driver priority,
   ``is_running()`` stays true, and this thread stays the owner, including
