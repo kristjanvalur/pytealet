@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- ``Runner.scheduler`` is the scheduler ``get_scheduler()`` returns. It is
-  created on first access. ``close()`` drops it.
 - ``iowait_or_dispose(waiter, dispose_cb, *, attempts=3)`` waits on an
   ``IOWaitable`` and is optional. The first ``wait`` that returns is the
   result. A throw is followed by another ``wait``, ``attempts`` times.

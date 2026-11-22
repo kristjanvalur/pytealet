@@ -234,6 +234,6 @@ def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
     """
 
     with Runner(scheduler_factory=lambda: QtScheduler(argv=argv)) as runner:
-        host = runner.scheduler.host
+        host = runner.get_scheduler().host
         runner.run(lambda: main(host))
-        return runner.scheduler.exit_code
+        return runner.get_scheduler().exit_code

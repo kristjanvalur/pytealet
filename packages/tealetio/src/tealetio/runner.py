@@ -58,16 +58,6 @@ class BaseRunner(Generic[SchedulerT]):
         assert scheduler is not None
         return scheduler
 
-    @property
-    def scheduler(self) -> SchedulerT:
-        """The scheduler ``get_scheduler()`` returns.
-
-        Created on first access. ``close`` drops it, so read it inside the
-        ``with`` block.
-        """
-
-        return self.get_scheduler()
-
     def _shutdown_scheduler_tasks(self, scheduler: SchedulerT) -> list[task_module.Task]:
         if not isinstance(scheduler, scheduler_module.BaseScheduler):
             return []
