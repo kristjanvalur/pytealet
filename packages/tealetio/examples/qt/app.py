@@ -327,10 +327,9 @@ def application(host: QtHost, *, self_test: bool = False) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     self_test = "--self-test" in args
-    scheduler = QtScheduler(argv=args)
-    with Runner(scheduler_factory=lambda: scheduler) as runner:
-        runner.run(lambda: application(scheduler.host, self_test=self_test))
-    return scheduler.exit_code
+    with Runner(scheduler_factory=lambda: QtScheduler(argv=args)) as runner:
+        runner.run(lambda: application(runner.scheduler.host, self_test=self_test))
+        return runner.scheduler.exit_code
 
 
 if __name__ == "__main__":

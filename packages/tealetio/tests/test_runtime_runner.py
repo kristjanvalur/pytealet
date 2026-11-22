@@ -569,6 +569,7 @@ class TestRunner:
         scheduler = runner.get_scheduler()
         assert isinstance(scheduler, Scheduler)
         assert runner.get_scheduler() is scheduler
+        assert runner.scheduler is scheduler
 
     def test_runner_debug_sets_scheduler_debug_flag(self):
         runner = Runner(debug=True)
@@ -713,6 +714,8 @@ class TestRunner:
             runner.run(lambda: None)
         with pytest.raises(RuntimeError, match="runner is closed"):
             runner.get_scheduler()
+        with pytest.raises(RuntimeError, match="runner is closed"):
+            _ = runner.scheduler
 
     def test_close_cancels_unfinished_tasks(self):
         runner = Runner()

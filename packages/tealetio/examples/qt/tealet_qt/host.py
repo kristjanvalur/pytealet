@@ -233,8 +233,7 @@ def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
     exception from ``main`` propagates.
     """
 
-    scheduler = QtScheduler(argv=argv)
-    with Runner(scheduler_factory=lambda: scheduler) as runner:
-        host = scheduler.host
+    with Runner(scheduler_factory=lambda: QtScheduler(argv=argv)) as runner:
+        host = runner.scheduler.host
         runner.run(lambda: main(host))
-    return scheduler.exit_code
+        return runner.scheduler.exit_code

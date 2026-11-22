@@ -893,8 +893,10 @@ block. Entering the runner installs the main context and holds it until the
 block exits. `close()` and `aclose()`, called in that block, cancel leftovers
 and shut the executor down on that same main tealet. Leaving the block
 restores the previous factory. A second `run()` in the same block keeps the
-tealet from the first. `tealetio.run()`, `run_async()`, and
-`run_asyncio_in_tealet()` are that shape:
+tealet from the first. `runner.scheduler` is the scheduler
+`get_scheduler()` returns. It is created on first access. `close()` drops
+it, so read `host` or `exit_code` inside the block. `tealetio.run()`,
+`run_async()`, and `run_asyncio_in_tealet()` are that shape:
 
 ```python
 with Runner() as runner:
