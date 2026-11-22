@@ -39,13 +39,14 @@ stay in place underneath.
 leftovers and the executor shutdown. Those calls use this same
 `exec`. There is no second driver.
 
-Qt drops an `exit` that arrives before `exec` starts. A target that
-is already done, including one that finishes in the slice before
-`exec`, skips `exec`. qasync always enters `exec` and then runs one
-`processEvents`. Closing our last window quits `exec` before the
-tealet parked on `finished` has been turned, and `aboutToQuit` has
-already stopped the host, so `QtScheduler` calls `turn` once more
-after `exec`.
+`stop` calls `app.exit` only while `exec` is on the stack. A target
+that finished earlier is remembered, and the first event inside
+`exec` performs that quit. That event is a 0 ms timer, the same
+place as qasync's `call_soon`, and it starts the host. The code
+`exec` returns is discarded. `run_until_complete` returns the
+target's result. After `exec`, one `turn` runs the tealet the window
+close queued. `aboutToQuit` has stopped the host by then. qasync's
+matching step is one `processEvents`.
 
 ## Inline proactor
 

@@ -377,5 +377,4 @@ def test_runner_drives_qt_scheduler_exec(app):
 
     with Runner(scheduler_factory=lambda: scheduler) as runner:
         assert runner.run(body) == "done"
-    assert scheduler.exit_code == 0
     assert parked[0].cancelled()

@@ -329,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     self_test = "--self-test" in args
     with Runner(scheduler_factory=lambda: QtScheduler(argv=args)) as runner:
         runner.run(lambda: application(runner.get_scheduler().host, self_test=self_test))
-        return runner.get_scheduler().exit_code
+        return 0
 
 
 if __name__ == "__main__":

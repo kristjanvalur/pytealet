@@ -967,9 +967,10 @@ with Runner(scheduler_factory=QtScheduler) as runner:
 ```
 
 `Runner.run` and `Runner.close` both call `run_until_complete`, so
-shutdown uses that same `exec`. An already-done target does not enter
-`exec`, because Qt drops an `exit` that arrived before `exec` starts.
-The proactor is the threaded default. `None` from `turn` means sleep
+shutdown uses that same `exec`. `stop` calls `app.exit` only while
+`exec` is on the stack. The code `exec` returns is discarded, and
+`run_until_complete` returns the target's result. The proactor is
+the threaded default. `None` from `turn` means sleep
 until `set_driver_wakeup`. An inline proactor does not post that
 callback; `QtHost.start` raises for `SelectorProactor` and for a
 `UringProactor` with `inline_completions` set. Hosting those backends

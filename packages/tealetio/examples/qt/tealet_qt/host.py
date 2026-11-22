@@ -124,18 +124,16 @@ class QtHost(QObject):
 class QtScheduler(Scheduler):
     """Scheduler whose driver is ``QApplication.exec``.
 
-    Same shape as ``qasync.QEventLoop``. ``run_forever`` parks in ``exec``.
-    ``run_until_complete`` does that too, and ``app.exit`` runs when the
-    target is done. A normal ``Runner`` is the session::
+    Same shape as ``qasync.QEventLoop``. ``run_forever`` and
+    ``run_until_complete`` park in ``exec``. The done callback calls
+    ``stop``. ``run_until_complete`` returns the target's result. The
+    code from ``exec`` is discarded. A normal ``Runner`` is the session::
 
         with Runner(scheduler_factory=QtScheduler) as runner:
             runner.run(main)
 
     ``Runner.close`` calls ``run_until_complete`` again for leftovers, so
-    that call is this method as well. An already-done target does not enter
-    ``exec``: Qt drops an ``exit`` that arrived before ``exec`` starts.
-    ``host`` is the ``QtHost`` for this scheduler. ``exit_code`` is the
-    first ``exec`` result, or ``0`` when nothing entered ``exec``.
+    that call is this method as well. ``host`` is the ``QtHost``.
     """
 
     def __init__(self, proactor_factory=None, *, argv: list[str] | None = None, runnable_queue_factory=None) -> None:
@@ -143,8 +141,8 @@ class QtScheduler(Scheduler):
         app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
         self._app = app
         self.host = QtHost(self)
-        self.exit_code = 0
-        self._saw_exec = False
+        self._in_exec = False
+        self._quit_pending = False
         self._quit_connected = False
         app.aboutToQuit.connect(self.host.stop)
         self._quit_connected = True
@@ -156,17 +154,22 @@ class QtScheduler(Scheduler):
         super().close()
 
     def stop(self) -> None:
-        """Stop the driver. Inside ``exec`` this is ``app.exit``."""
+        """Stop the driver. ``app.exit`` runs only while ``exec`` is on the stack."""
 
         super().stop()
-        self._app.exit()
+        if self._in_exec:
+            self._app.exit()
+            return
+        # Qt drops an exit() that arrives before exec starts. The first
+        # timer inside exec performs this one.
+        self._quit_pending = True
 
     def run_forever(self, *, yield_every: int | None = None) -> None:
         """Park in ``QApplication.exec`` until ``stop`` or the last window."""
 
         self._validate_yield_every(yield_every)
         self._verify_current_scheduler()
-        self._run_exec(None)
+        self._run_exec()
 
     def run_until_complete(self, future, *, yield_every: int | None = None):
         """Run until ``future`` is done. ``exec`` returns when it completes."""
@@ -177,7 +180,7 @@ class QtScheduler(Scheduler):
             target = self._coerce_target(future)
         target.add_done_callback(self._exit_on_done)
         try:
-            self._run_exec(target)
+            self._run_exec()
         finally:
             target.remove_done_callback(self._exit_on_done)
         if not target.done():
@@ -195,24 +198,33 @@ class QtScheduler(Scheduler):
         raise TypeError("future must be a Future or callable")
 
     def _exit_on_done(self, _future) -> None:
-        # qasync's done callback calls stop(), which is app.exit().
-        self._app.exit()
+        self.stop()
 
-    def _run_exec(self, target) -> None:
+    def _begin(self) -> None:
+        """First event inside ``exec``. Start the host, then honour an early quit."""
+
+        self.host.start()
+        if self._quit_pending:
+            self._quit_pending = False
+            self._app.exit()
+
+    def _run_exec(self) -> None:
         try:
             with self.running():
-                self.host.start()
-                if target is not None and target.done():
-                    return
-                code = int(self._app.exec())
-                if not self._saw_exec:
-                    self.exit_code = code
-                    self._saw_exec = True
-                # closing the window quits exec before the tealet parked on
-                # finished has been turned. aboutToQuit has stopped the host.
-                if target is not None and not target.done():
-                    self.turn()
+                # the entry runs on this timer, so a quit in that slice is
+                # inside exec. qasync's call_soon is the same 0 ms timer.
+                QTimer.singleShot(0, self._begin)
+                self._in_exec = True
+                try:
+                    self._app.exec()
+                finally:
+                    self._in_exec = False
+                # qasync follows exec with one processEvents. the window
+                # close queues the parked tealet and aboutToQuit has
+                # stopped the host, so this slice runs it.
+                self.turn()
         finally:
+            self._quit_pending = False
             self.host.stop()
 
     def _disconnect_quit(self) -> None:
@@ -229,11 +241,11 @@ def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
     """Host ``main`` as one tealet under ``QApplication.exec``.
 
     ``main`` receives the ``QtHost``. This is a normal ``Runner`` around a
-    ``QtScheduler``. The return value is the first ``exec`` code. An
-    exception from ``main`` propagates.
+    ``QtScheduler``. The return value is ``0``. An exception from ``main``
+    propagates.
     """
 
     with Runner(scheduler_factory=lambda: QtScheduler(argv=argv)) as runner:
         host = runner.get_scheduler().host
         runner.run(lambda: main(host))
-        return runner.get_scheduler().exit_code
+        return 0
