@@ -2990,6 +2990,13 @@ class TestSchedulerAccessors:
 
         assert s.run_until_complete(worker) == 42
 
+    def test_run_until_complete_returns_an_already_done_future(self):
+        s = _new_scheduler()
+        set_scheduler(s)
+        fut: Future[int] = Future()
+        fut.set_result(7)
+        assert s.run_until_complete(fut) == 7
+
     def test_run_until_complete_rejects_callable_args(self):
         s = _new_scheduler()
         set_scheduler(s)

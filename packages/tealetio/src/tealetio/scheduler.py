@@ -559,14 +559,19 @@ class BaseDrivingMixin:
         *,
         yield_every: int | None = None,
     ) -> T:
-        """Run scheduler work until `future` completes and return its result."""
+        """Run scheduler work until `future` completes and return its result.
+
+        A finished target returns here. Otherwise ``stop()`` runs when it
+        finishes, and ``arun_forever`` drives until that flag or an earlier
+        ``stop()``.
+        """
 
         assert isinstance(self, BaseScheduler)
         self._verify_current_scheduler()
         self._validate_yield_every(yield_every)
         # create the entry before running(). is_running() becomes true only
         # inside that context, so an eager factory queues the entry behind
-        # work that is already runnable. the loop below then drives it.
+        # work that is already runnable. arun_forever then drives it.
         with self.main_context():
             if isinstance(future, _tasks.Future):
                 target: _tasks.Future[T] = future
@@ -577,17 +582,23 @@ class BaseDrivingMixin:
             else:
                 raise TypeError("future must be a Future or callable")
 
-        with self.running():
-            self._before_arun()
-            self._stopping = False
-            try:
-                with self._slice():
-                    while not target.done() and not self._stopping:
-                        self._run_ready_batch(yield_every)
-                        if target.done() or self._stopping:
-                            break
-                        await self._idle_or_poll()
-            finally:
+        # already done: the callback would call stop() before arun_forever
+        # clears that flag on entry.
+        if target.done():
+            return target.result()
+
+        def stop_when_done(_done: _tasks.Future[T]) -> None:
+            self.stop()
+
+        target.add_done_callback(stop_when_done)
+        try:
+            # completion while adding the callback runs it now. leave the loop
+            # out, and drop the flag that stop() just set.
+            if not target.done():
+                await self.arun_forever(yield_every=yield_every)
+        finally:
+            target.remove_done_callback(stop_when_done)
+            if target.done():
                 self._stopping = False
 
         if not target.done():
