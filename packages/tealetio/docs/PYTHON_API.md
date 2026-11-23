@@ -858,8 +858,10 @@ matching asyncio's fire-and-forget warning. `CancelledError` is not logged.
 ## Scheduler drivers
 
 `run_until_complete(target)` drives until `target` is done.
-`run_forever()` drives until `stop()`. Each method has its own loop.
-A callable `target` is spawned before `running()` starts, while
+`run_forever()` drives until `stop()`. `run_until_complete` calls
+`stop()` when the target finishes and then calls `run_forever`. A
+target that is already done returns its result without entering the
+loop. A callable `target` is spawned before `running()` starts, while
 `is_running()` is still false, so an eager task factory queues it behind
 tasks that are already runnable. `Runner.run()` / `tealetio.run()` spawn
 the entry first, then call `run_until_complete`.

@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ``run_until_complete`` / ``arun_until_complete`` call ``stop()`` when the
+  target finishes and then call ``run_forever`` / ``arun_forever``. A
+  target that is already done returns its result without entering the loop.
 - The ``stream_diag`` module is removed, along with its spawn, switch,
   accept-path, recv-iter, and worker-completion probes. Those samples
   were bench tooling. The HTTP bench ``--diag`` flag is removed with
