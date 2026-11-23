@@ -8,14 +8,11 @@ we also time until the peer sees EOF.
 Usage::
 
     uv run --active --package tealetio python packages/tealetio/bench/micro_send_close.py --uring
-    TEALETIO_EAGER_SEND=0 uv run --active --package tealetio python \\
-      packages/tealetio/bench/micro_send_close.py --uring
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import socket
 import statistics
 import time
@@ -134,8 +131,7 @@ def main() -> None:
     args = parser.parse_args()
     payload = b"x" * args.payload
     backend = "uring" if args.uring else "selector"
-    eager = os.environ.get("TEALETIO_EAGER_SEND", "1")
-    print(f"backend={backend} TEALETIO_EAGER_SEND={eager} payload={args.payload} n={args.iterations}")
+    print(f"backend={backend} payload={args.payload} n={args.iterations}")
     for label, fn in (("classic sendall+close", _bench_classic), ("sock_send_close", _bench_send_close)):
         fn(iterations=args.warmup, payload=payload, uring=args.uring)
         submit, eof = fn(iterations=args.iterations, payload=payload, uring=args.uring)

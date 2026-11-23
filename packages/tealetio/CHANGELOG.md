@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``TEALETIO_WAKEUP_MANAGER`` switch and break-wait timing probes.
   ``BasicScheduler`` wakes its ``threading.Event`` directly. Proactor
   waits keep the ``EventWakeupManager`` in ``proactor.py``.
+- The request-phase profiler (``profile_request.py``, ``profile_timing.py``,
+  and the server ``--profile`` flag) is removed. ``micro_eager_compare.py``
+  is removed; it toggled ``TEALETIO_EAGER_SEND`` / ``TEALETIO_EAGER_IO``,
+  which the IO manager no longer reads.
 - Re-entering ``main_context()`` for the same scheduler and task
   constructor keeps the main tealet. ``Runner`` and ``AsyncRunner`` are
   used as context managers: the ``with`` block holds one such context,

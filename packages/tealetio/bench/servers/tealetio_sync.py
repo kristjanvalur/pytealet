@@ -54,68 +54,10 @@ def _scheduler_factory(
     return SyncProactorScheduler
 
 
-def _enable_profile_open_stamp() -> None:
-    """Stamp stream-open time on the delivery thread, before the marshal.
-
-    ``start_server`` no longer takes a ``stream_factory``. ``--profile`` wraps
-    the open helper so ``pre_handler_ms`` still measures marshal-plus-spawn.
-    """
-
-    from profile_timing import stamp_stream_open
-
-    import tealetio.streams.server as server_mod
-
-    open_accepted = server_mod._open_accepted_streams
-
-    def open_and_stamp(io, accepted, *, limit, async_, sslcontext):
-        pair = open_accepted(io, accepted, limit=limit, async_=async_, sslcontext=sslcontext)
-        stamp_stream_open(accepted)
-        return pair
-
-    server_mod._open_accepted_streams = open_and_stamp
-
-
-def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader, StreamWriter], None]:
+def _make_client_handler() -> Callable[[StreamReader, StreamWriter], None]:
     """Serve one connection on a handler tealet (spawned after streams are ready)."""
 
-    gate = None
-    if profile:
-        from profile_timing import HandlerProfileGate
-
-        gate = HandlerProfileGate()
-
     def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-        req_num = gate.next_req_num() if gate is not None else None
-        timer = None
-        if req_num is not None:
-            from profile_timing import PhaseTimer, drain_request_profile, pre_handler_ms
-
-            timer = PhaseTimer(f"tealetio-{backend}", req_num)
-            sock = writer.get_extra_info("socket")
-            opened = pre_handler_ms(sock)
-            extra = {"fd": sock.fileno()}
-            if opened is not None:
-                extra["pre_handler_ms"] = opened
-            # handler tealet is running; pre_handler_ms is spawn lag before this line
-            timer.mark("handler_start", **extra)
-        if timer is not None:
-            # body: read headers, write response, wait for send + socket teardown
-            drain_request_profile(reader, timer)
-            timer.mark("drain")
-            writer.write(RESPONSE)
-            timer.mark("write")
-            writer.drain()
-            timer.mark("drain_out")
-            writer.close()
-            timer.mark("close")
-            # Split shutdown: flush (parks) vs sock_close (forget, should be ~0).
-            # StreamServer also wait_closed() in finally (cheap once closed).
-            writer.flush()
-            timer.mark("flush")
-            writer.wait_closed()
-            timer.mark("sock_close")
-            timer.finish()
-            return
         drain_request(reader)
         writer.write(RESPONSE)
         writer.drain()
@@ -127,7 +69,6 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_tealetio_args(parser)
-    parser.add_argument("--profile", action="store_true", help="emit per-request PROFILE lines to stderr")
     parser.add_argument(
         "--completion-threads",
         type=int,
@@ -153,15 +94,13 @@ def main() -> None:
         completion_threads=args.completion_threads,
         sqpoll=args.sqpoll,
     )
-    if args.profile:
-        _enable_profile_open_stamp()
 
     def exercise() -> None:
         scheduler = _current_scheduler()
         if scheduler is None:
             raise RuntimeError("bench server requires an active scheduler")
         server = start_server(
-            _make_client_handler(args.proactor, args.profile),
+            _make_client_handler(),
             addr=(args.host, args.port),
             backlog=args.backlog,
             reuse_address=args.reuse_address,
@@ -174,11 +113,6 @@ def main() -> None:
         run(exercise, scheduler_factory=factory)
     except KeyboardInterrupt:
         pass
-    finally:
-        if args.profile:
-            from profile_timing import _HandlerAggregate
-
-            _HandlerAggregate.dump(final=True)
 
 
 if __name__ == "__main__":
