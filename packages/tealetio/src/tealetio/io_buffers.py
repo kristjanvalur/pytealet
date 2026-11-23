@@ -17,7 +17,6 @@ from .delivery import MultishotDelivery, OpHandle, ReorderBuffer, io_cancellatio
 from .locks import CrossThreadCondition, PulseEvent
 from .scheduler import get_running_scheduler
 from .socket_helpers import socket
-from .stream_diag import recv_iter_path_begin, recv_iter_path_finish, recv_iter_path_mark
 from .types import SocketSendBuffer
 
 if TYPE_CHECKING:
@@ -119,11 +118,8 @@ class RecvIterBuffer:
         owns_pool: bool = False,
         release_pool: Callable[[_BufGroupLike], None] | None = None,
     ) -> None:
-        fd = sock.fileno()
-        recv_iter_path_begin(fd)
         if scheduler is None:
             scheduler = get_running_scheduler()
-            recv_iter_path_mark(fd, "scheduler")
         self._sock = sock
         self._buffer_pool = buffer_pool
         self._owns_pool = owns_pool
@@ -140,17 +136,12 @@ class RecvIterBuffer:
         self._current_operation: OpHandle | None = None
         self._recv_ended = False
         self._closed = False
-        recv_iter_path_mark(fd, "setup")
         self.on_result = marshal_to_scheduler(scheduler, self._reorder_buffer.deliver)
-        recv_iter_path_mark(fd, "marshal_cb")
         self._start_recv_many(base_sequence=0)
-        recv_iter_path_finish(fd)
 
     def _start_recv_many(self, *, base_sequence: int) -> None:
         if self._closed or self._recv_ended:
             return
-        fd = self._sock.fileno()
-        recv_iter_path_mark(fd, "recv_many_enter")
         # set_op runs before a same-stack completion (selector ENOBUFS, or any
         # delivery marshal_to_scheduler runs immediately). that completion may
         # clear _current_operation: the leg is finished and resume waits for
@@ -175,7 +166,6 @@ class RecvIterBuffer:
             # not queued, or the callback already dropped the handle
             self._current_operation = None
             raise
-        recv_iter_path_mark(fd, "recv_store")
 
     def _schedule_resubmit(self, *, base_sequence: int) -> None:
         # only ENOBUFS / more=False-with-data; EOF sets _recv_ended instead

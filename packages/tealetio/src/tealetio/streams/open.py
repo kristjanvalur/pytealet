@@ -11,7 +11,6 @@ from typing import Any, Literal, Protocol, TypeAlias, cast, overload
 
 from ..io_buffers import RecvIterBuffer, SendBuffer
 from ..socket_helpers import socket
-from ..stream_diag import accept_path_mark
 from .reader import AsyncStreamReader, ReadStream, StreamReader
 from .util import DEFAULT_LIMIT
 from .writer import AsyncStreamWriter, StreamWriter, StreamWriterIO, WriteStream
@@ -124,15 +123,11 @@ def default_stream_factory(
     back when the receive buffer shuts down.
     """
 
-    fd = sock.fileno()
     writer_io = cast(StreamWriterIO, io)
     recv_buffer = open_recv_buffer(io, sock, buffer_pool, owns_pool=owns_pool)
-    accept_path_mark(fd, "recv_iter")
     send_buffer = open_send_buffer(io, sock)
-    accept_path_mark(fd, "send_buf")
     reader = StreamReader(limit=limit, recv_buffer=recv_buffer)
     writer = StreamWriter(send_buffer=send_buffer, sock=sock, io=writer_io, reader=reader)
-    accept_path_mark(fd, "stream_objs")
     return reader, writer
 
 
@@ -201,14 +196,9 @@ def pooled_default_stream_factory(
         *,
         limit: int = DEFAULT_LIMIT,
     ) -> tuple[StreamReader, StreamWriter] | tuple[AsyncStreamReader, AsyncStreamWriter]:
-        accept_path_mark(sock.fileno(), "pooled_enter")
-        fd = sock.fileno()
         if pool is not None:
-            accept_path_mark(fd, "pool_shared")
             return delegate(io, sock, limit=limit, buffer_pool=pool, owns_pool=False)
-        accept_path_mark(fd, "pool_enter")
         chosen = io.acquire_recv_buffer_pool()
-        accept_path_mark(fd, "pool_create")
         return delegate(io, sock, limit=limit, buffer_pool=chosen, owns_pool=True)
 
     if async_:
@@ -236,7 +226,6 @@ def open_streams(
         factory = default_async_stream_factory if async_ else default_stream_factory
     else:
         factory = stream_factory
-    accept_path_mark(sock.fileno(), "open_streams")
     reader, writer = factory(io, sock, limit=limit)
     if async_:
         return cast(AsyncStreamPair, (reader, writer))

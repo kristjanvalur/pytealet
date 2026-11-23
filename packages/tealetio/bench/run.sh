@@ -15,7 +15,6 @@
 #   WRK_WARMUP      warmup duration before measured run (default 5s)
 #   WRK_RUNS        repeated measured runs (default 3)
 #   SERVER_ARGS              extra args passed to the server (e.g. --proactor uring)
-#   TEALETIO_WAKEUP_MANAGER  event (default) or token for uring proactor
 
 set -euo pipefail
 
@@ -45,8 +44,7 @@ if ! command -v wrk >/dev/null 2>&1; then
 fi
 
 cd "${REPO_ROOT}"
-env TEALETIO_WAKEUP_MANAGER="${TEALETIO_WAKEUP_MANAGER:-}" \
-  uv run --active --package tealetio python "${SERVER_SCRIPT}" --port "${PORT}" ${SERVER_ARGS} "$@" &
+uv run --active --package tealetio python "${SERVER_SCRIPT}" --port "${PORT}" ${SERVER_ARGS} "$@" &
 SERVER_PID=$!
 
 cleanup() {

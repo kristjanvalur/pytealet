@@ -13,7 +13,6 @@ if str(_BENCH_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCH_DIR))
 
 from common import RESPONSE, add_tealetio_args, drain_request  # noqa: E402
-from diag import start_watchdog  # noqa: E402
 
 from tealetio import run
 from tealetio.proactor import (
@@ -23,7 +22,6 @@ from tealetio.proactor import (
     UringProactor,
 )
 from tealetio.scheduler import _current_scheduler
-from tealetio.stream_diag import enabled as diag_enabled, event as diag_event
 from tealetio.streams import StreamReader, StreamWriter, start_server
 
 
@@ -87,16 +85,15 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
         gate = HandlerProfileGate()
 
     def client_handler(reader: StreamReader, writer: StreamWriter) -> None:
-        sock = writer.get_extra_info("socket")
-        fd = sock.fileno()
         req_num = gate.next_req_num() if gate is not None else None
         timer = None
         if req_num is not None:
             from profile_timing import PhaseTimer, drain_request_profile, pre_handler_ms
 
             timer = PhaseTimer(f"tealetio-{backend}", req_num)
+            sock = writer.get_extra_info("socket")
             opened = pre_handler_ms(sock)
-            extra = {"fd": fd}
+            extra = {"fd": sock.fileno()}
             if opened is not None:
                 extra["pre_handler_ms"] = opened
             # handler tealet is running; pre_handler_ms is spawn lag before this line
@@ -119,15 +116,9 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
             timer.mark("sock_close")
             timer.finish()
             return
-        if diag_enabled():
-            diag_event("bench_drain_begin", fd=fd)
         drain_request(reader)
-        if diag_enabled():
-            diag_event("bench_write_begin", fd=fd)
         writer.write(RESPONSE)
         writer.drain()
-        if diag_enabled():
-            diag_event("bench_close_begin", fd=fd)
         writer.close()
 
     return client_handler
@@ -136,11 +127,6 @@ def _make_client_handler(backend: str, profile: bool) -> Callable[[StreamReader,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_tealetio_args(parser)
-    parser.add_argument(
-        "--diag",
-        action="store_true",
-        help="enable TEALETIO_STREAM_DIAG and a periodic stall watchdog",
-    )
     parser.add_argument("--profile", action="store_true", help="emit per-request PROFILE lines to stderr")
     parser.add_argument(
         "--completion-threads",
@@ -155,11 +141,6 @@ def main() -> None:
         help="IORING_SETUP_SQPOLL: kernel thread issues; userspace still publishes at the usual points",
     )
     args = parser.parse_args()
-    if args.diag:
-        import os
-
-        os.environ["TEALETIO_STREAM_DIAG"] = "1"
-        os.environ["TEALETIO_URING_ACCEPT_LOG"] = "1"
     if args.completion_threads is not None and args.completion_threads < 0:
         parser.error("--completion-threads must be non-negative")
     if args.completion_threads is not None and args.proactor == "selector":
@@ -187,9 +168,6 @@ def main() -> None:
             reuse_port=args.reuse_port,
             scheduler=scheduler,
         )
-        if args.diag:
-            start_watchdog(scheduler, server)
-            diag_event("bench_listen", host=args.host, port=args.port, proactor=args.proactor)
         server.serve_forever()
 
     try:

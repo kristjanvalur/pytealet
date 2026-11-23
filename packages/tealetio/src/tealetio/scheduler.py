@@ -43,18 +43,6 @@ from .locks import (
     timeout as scheduler_timeout,
 )
 from .socket_helpers import socket
-from .stream_diag import (
-    sched_note_batch,
-    sched_note_busy_continue,
-    sched_note_loop_iter,
-    sched_note_make_runnable,
-    sched_note_schedule,
-    sched_note_wait,
-    sched_note_wait_no_progress,
-    tealet_run,
-    tealet_switch,
-)
-from .wakeup import note_break_wait_signal, note_break_wait_wake, yield_after_break_wait_wakeup
 
 T = TypeVar("T")
 
@@ -594,25 +582,11 @@ class BaseDrivingMixin:
             self._stopping = False
             try:
                 with self._slice():
-                    prev_wait = False
                     while not target.done() and not self._stopping:
-                        sched_note_loop_iter()
-                        t0 = time.perf_counter_ns()
-                        n_xfer = self._run_ready_batch(yield_every)
-                        sched_note_batch(n_xfer, time.perf_counter_ns() - t0)
-                        if prev_wait and n_xfer == 0:
-                            sched_note_wait_no_progress()
-                        prev_wait = False
+                        self._run_ready_batch(yield_every)
                         if target.done() or self._stopping:
                             break
-                        busy = self._has_local_ready_work()
-                        if busy:
-                            sched_note_busy_continue()
-                        t1 = time.perf_counter_ns()
                         await self._idle_or_poll()
-                        if not busy:
-                            sched_note_wait(time.perf_counter_ns() - t1)
-                            prev_wait = True
             finally:
                 self._stopping = False
 
@@ -2157,12 +2131,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         return t
 
     def _schedule(self, enqueue=None, *, explicit: bool = False) -> None:
-        sched_note_schedule()
         if enqueue is not None:
             enqueue()
         target = self._find_target(explicit=explicit)
         # one drain at the start of _run_ready_batch. resumes do not drain.
-        tealet_switch(target)
+        target.switch()
 
     def yield_(self) -> None:
         """Yield the current task and make it runnable again.
@@ -2281,7 +2254,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         t._scheduler = self
         self._runnable.add(t)
         self._bind_runnable(t)
-        sched_note_make_runnable()
         self._wake_unless_owner_driving()
 
     def _make_runnable_next(self, t: tealet.tealet) -> None:
@@ -2292,7 +2264,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         t._scheduler = self
         self._runnable.add(t, 0)
         self._bind_runnable(t)
-        sched_note_make_runnable()
 
     def _bind_runnable(self, t: tealet.tealet) -> None:
         t.link = self._runnable_link
@@ -2341,7 +2312,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert isinstance(target, _tasks.Task)
         target._unlink()
         self._park_current()
-        tealet_switch(target)
+        target.switch()
 
     def _target_run_eager(self, target: tealet.tealet, task_main) -> None:
         """Start an unlinked NEW/STUB task via one-shot tealet.run()."""
@@ -2350,7 +2321,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         assert target.link is None
         assert target.state in (_tealet.STATE_NEW, _tealet.STATE_STUB)
         self._park_current(resume_next=True)
-        tealet_run(target, task_main, None)
+        tealet.tealet.run(target, task_main, None)
 
     def _target_throw(self, target: tealet.tealet, exc: BaseException) -> None:
         if target is tealet.current():
@@ -2555,20 +2526,15 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
 
     def _break_wait(self) -> None:
         self._wakeup.set()
-        note_break_wait_signal("basic")
-        yield_after_break_wait_wakeup("basic")
 
     def _poll_io(self) -> None:
-        woke = self._wakeup.wait(timeout=0)
-        if woke:
-            note_break_wait_wake("basic", woke)
+        if self._wakeup.wait(timeout=0):
             self._wakeup.clear()
 
     def _wait_thread(self) -> None:
         deadline = self._next_timer_deadline()
         timeout = None if deadline is None else self._delay_until(deadline)
-        woke = self._wakeup.wait(timeout=timeout)
-        note_break_wait_wake("basic", woke)
+        self._wakeup.wait(timeout=timeout)
         self._wakeup.clear()
 
 
