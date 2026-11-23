@@ -74,6 +74,10 @@ Before release tags, run `make check` and `uv lock --check`. For `tealet`
 not under `[Unreleased]`. The publish job copies that block into the GitHub
 release and fails if it is missing or empty.
 
+Custom benchmarking code should typically not be merged from a branch into
+`main` along with the feature. Timing probes, diagnostic modules, and
+bench-only call sites belong on the branch that is measuring.
+
 ### Pull-request workflow (do not load giant skills)
 
 After `make check` is green:

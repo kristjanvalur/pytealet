@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The ``stream_diag`` module is removed, along with its spawn, switch,
+  accept-path, recv-iter, and worker-completion probes. Those samples
+  were bench tooling. The HTTP bench ``--diag`` flag is removed with
+  them. Scheduler driver samples (``sched_note_*``, ``tealet_switch``,
+  ``tealet_run``) go with that module.
+- The experiment ``wakeup.py`` module is removed. It held an unused
+  ``TEALETIO_WAKEUP_MANAGER`` switch and break-wait timing probes.
+  ``BasicScheduler`` wakes its ``threading.Event`` directly. Proactor
+  waits keep the ``EventWakeupManager`` in ``proactor.py``.
+- The request-phase profiler (``profile_request.py``, ``profile_timing.py``,
+  and the server ``--profile`` flag) is removed. ``micro_eager_compare.py``
+  is removed; it toggled ``TEALETIO_EAGER_SEND`` / ``TEALETIO_EAGER_IO``,
+  which the IO manager no longer reads.
 - Re-entering ``main_context()`` for the same scheduler and task
   constructor keeps the main tealet. ``Runner`` and ``AsyncRunner`` are
   used as context managers: the ``with`` block holds one such context,

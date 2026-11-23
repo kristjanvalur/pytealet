@@ -81,12 +81,6 @@ sendall+close vs `sock_send_close`::
 
     uv run --active --package tealetio python packages/tealetio/bench/micro_send_close.py --uring
 
-Uring send first-leg hint (`IoExpect.READY` vs `BLOCK`)::
-
-    uv run --active --package tealetio python packages/tealetio/bench/micro_send_expect.py
-    uv run --active --package tealetio python -m pytest \
-      packages/tealetio/tests/test_proactor.py::TestUringProactor::test_native_send_expect_ready_vs_block_timing -s
-
 ## CI
 
 `.github/workflows/tealetio-bench.yml` runs on pull requests and on pushes to

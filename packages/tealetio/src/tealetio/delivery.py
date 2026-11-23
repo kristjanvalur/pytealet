@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, TypeVar
 
 from .socket_helpers import abortive_close, socket
-from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 
 if TYPE_CHECKING:
     from .scheduler import BaseScheduler
@@ -109,11 +108,7 @@ class _DeliveryHandle:
         callback = self._result_callback
         if callback is None:
             return
-        worker_completion_mark_emit_start()
-        try:
-            callback(delivery)
-        finally:
-            worker_completion_mark_emit_end()
+        callback(delivery)
 
     def _emit_result(
         self,

@@ -13,13 +13,6 @@ from ..io_manager import ProactorIOManager, SocketIO
 from ..io_waiter import IOWaiter
 from ..scheduler import BaseScheduler
 from ..socket_helpers import abortive_close, run_accept_loop, socket
-from ..stream_diag import (
-    accept_marshal,
-    accept_scheduler,
-    accept_spawn,
-    accept_streams_opened,
-    accept_worker_conn,
-)
 from ..tasks import CancelledError, Task, get_current
 from .common import require_proactor_io, resolve_scheduler
 from .open import (
@@ -212,17 +205,9 @@ def _accept_open_streams(
             raise
 
     def thread_handler(accepted: socket.socket) -> None:
-        fd = accepted.fileno()
-        accept_worker_conn(fd)
         streams = open_and_deliver(accepted)
-        accept_streams_opened(fd)
-        accept_marshal(fd)
 
         def on_scheduler() -> None:
-            _reader, writer = streams
-            peer = writer.get_extra_info("socket")
-            if peer is not None:
-                accept_scheduler(peer.fileno())
             deliver_streams(streams)
 
         io._marshal_on_scheduler(on_scheduler)
@@ -535,9 +520,6 @@ class StreamServer:
             return
 
         reader, writer = streams
-        sock = writer.get_extra_info("socket")
-        if sock is not None:
-            accept_spawn(sock.fileno())
         client_handler = self._client_handler
         assert client_handler is not None
         async_ = self._accept_async
@@ -714,8 +696,6 @@ def start_server_impl(
     server._ssl_handshake_timeout = ssl_handshake_timeout if ssl else None
 
     def thread_handler(accepted: socket.socket) -> None:
-        fd = accepted.fileno()
-        accept_worker_conn(fd)
         reader, writer = _open_accepted_streams(
             io,
             accepted,
@@ -723,16 +703,11 @@ def start_server_impl(
             async_=async_,
             sslcontext=sslcontext,
         )
-        accept_streams_opened(fd)
-        accept_marshal(fd)
 
         def deliver() -> None:
             if server._closed:
                 shutdown_stream_writer(writer, best_effort=True)
                 return
-            peer = writer.get_extra_info("socket")
-            if peer is not None:
-                accept_scheduler(peer.fileno())
             server._on_accept((reader, writer))
 
         # a scheduler that refuses the post leaves the opened pair intact

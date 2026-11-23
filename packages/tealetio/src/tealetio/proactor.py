@@ -39,7 +39,6 @@ from .scheduler import (
     _deliver_deferred_host_wakeups,
 )
 from .socket_helpers import configure_scheduler_socket, set_tcp_nodelay, socket
-from .stream_diag import worker_completion_mark_emit_end, worker_completion_mark_emit_start
 from .types import IoExpect, IoMore, RecvResult
 
 T = TypeVar("T")
@@ -201,11 +200,7 @@ def _recv_many_enobufs_delivery(*, index: int) -> MultishotDelivery:
 
 
 def _emit_many(user_cb, delivery) -> None:
-    worker_completion_mark_emit_start()
-    try:
-        user_cb(delivery)
-    finally:
-        worker_completion_mark_emit_end()
+    user_cb(delivery)
 
 
 def _emit_recv_many(user_cb, delivery) -> None:
