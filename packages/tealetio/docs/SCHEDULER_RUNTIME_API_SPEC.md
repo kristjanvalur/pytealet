@@ -852,18 +852,17 @@ Status: Implemented for current sync/async scheduler drivers.
   while they run, including `call_later(0)`, waits for
   the next drain.
   `call_soon` is not cancellable, does not return a handle, and does not
-  `break_wait`. `call_soon_threadsafe` always
-  `_break_wait`s and copies context. `call_on_scheduler` does not copy
-  context. The owner thread runs it on the current stack. Any other thread
-  queues it and wakes the driver. When that owner callback runs while
-  `_in_driver_wait` is set (the flag around `_driver_wait` in
-  `_idle_or_poll`), it calls `_break_wait` afterwards so a `PulseEvent.set`
-  in the callback is serviced when the wait returns. That flag is not
-  `_runner`, not `_in_callback_drain`, and not the ring's
-  `skip_owner_break_wait`. `stop()`, `_make_runnable`, and timer enqueue
-  call `_wake_driver` from another thread, from the owner thread between
-  `turn()` slices, and from the owner thread while `_in_driver_wait` is set.
-  During a slice the owner thread reads its queues before the next park.
+  `break_wait`. `call_soon_threadsafe` copies context and queues.
+  `call_on_scheduler` does not copy context. The owner thread runs it on
+  the current stack. Any other thread queues it. Both then call
+  `_wake_unless_owner_driving`, as do `stop()`, `_make_runnable`, and timer
+  enqueue. Another thread always wakes. The owner wakes outside a slice,
+  and while `_in_internal_wait` is set (the flag around `_driver_wait` in
+  `_idle_or_poll`; it implies `_in_turn`). During a slice the owner thread
+  reads its queues before the next park. That flag is not `_runner`, not
+  `_in_callback_drain`, and not the ring's `skip_owner_break_wait`. A
+  `PulseEvent.set` on the owner during that wait is serviced when the wait
+  returns.
   `_owner_thread` stays set for the whole `running()` block. It is `None`
   outside `running()` / `run` / `arun`, so those callers wake too. A wake
   between slices posts `set_driver_wakeup` on the owner thread as well.
@@ -907,8 +906,9 @@ Status: Implemented.
   `_break_wait` forwards to it (one method; safe from any thread). Production
   IO wakes through operation `add_done_callback` → `call_soon_threadsafe` →
   `_break_wait` → `wake_wait()`, not proactor-internal completion hooks.
-  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` wake
-  when `_in_driver_wait` is set, and when the caller is not the owner thread.
+  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` use
+  `_wake_unless_owner_driving`: another thread, the owner outside a slice,
+  and the owner while `_in_internal_wait` is set.
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
   `UringProactor` and `ThreadedSelectorProactor` unpark through
   `EventWakeupManager.wait_async()`; `bind_loop()` prepares the asyncio waiter
