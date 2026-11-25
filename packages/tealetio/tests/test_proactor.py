@@ -2271,6 +2271,16 @@ class TestSelectorProactor:
         finally:
             proactor.close()
 
+    def test_wake_wait_runs_async_break(self):
+        seen: list[str] = []
+        proactor = SelectorProactor()
+        try:
+            proactor.set_async_break(lambda: seen.append("host"))
+            proactor.wake_wait()
+            assert seen == ["host"]
+        finally:
+            proactor.close()
+
     def test_wait_without_pending_operations_waits_for_timeout(self):
         proactor = SelectorProactor()
         try:
@@ -2541,6 +2551,48 @@ class TestThreadedSelectorProactor:
             proactor.wait(proactor.get_time() + 0.01)
             assert seen == []
         finally:
+            proactor.close()
+
+    def test_wake_wait_runs_async_break(self):
+        seen: list[str] = []
+        proactor = ThreadedSelectorProactor()
+        try:
+            proactor.set_async_break(lambda: seen.append("host"))
+            proactor.wake_wait()
+            assert seen == ["host"]
+            proactor.set_async_break(None)
+            proactor.wake_wait()
+            assert seen == ["host"]
+        finally:
+            proactor.close()
+
+    def test_worker_async_break_runs_after_the_poll_callback(self):
+        proactor = ThreadedSelectorProactor()
+        reader, writer = socket.socketpair()
+        order: list[str] = []
+        finished = threading.Event()
+
+        def on_recv(_result: object, _exc: BaseException | None) -> None:
+            order.append("callback")
+            proactor.wake_wait()
+            order.append("after-wake")
+
+        def on_break() -> None:
+            order.append("break")
+            finished.set()
+
+        try:
+            reader.setblocking(False)
+            writer.setblocking(False)
+            proactor.set_async_break(on_break)
+            proactor.recv(reader, 1, on_recv)
+            proactor.wait(0)
+            writer.send(b"x")
+            assert finished.wait(1.0) is True
+            assert order == ["callback", "after-wake", "break"]
+        finally:
+            reader.close()
+            writer.close()
             proactor.close()
 
     def test_wait_without_pending_operations_returns_on_break_wait(self):

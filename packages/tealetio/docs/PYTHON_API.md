@@ -623,9 +623,11 @@ not every socket) and harvest with `wait(0)` on the loop thread; see
 Hosts that cannot watch an fd can fall back to a `Ring.poll()` helper.
 
 `ThreadedSelectorProactor` uses an inlined `EventWakeupManager` for sync and
-async waits. `SelectorProactor.wait_async()` still runs `wait()` in a
-thread-pool executor; optional `set_async_break()` can install a host-loop hook
-for that path.
+async waits. `wake_wait()` signals that event and runs `set_async_break()`
+when one is installed, so a host parked in its own loop (a Qt `exec`) hears
+the selector worker. The worker runs that hook after it drops the poll lock.
+`SelectorProactor.wait_async()` still runs `wait()` in a thread-pool executor
+and runs the same hook from `wake_wait()`.
 
 ## Blocking IO facade (`scheduler.io`)
 
@@ -943,6 +945,13 @@ handling events while a tealet is busy.
 ```python
 scheduler.set_driver_wakeup(host.notify)  # any thread; must not call turn()
 ```
+
+That call also installs the callback on the proactor. A worker `wake_wait`
+runs it, including housekeeping that never enters the scheduler. On uring
+the hook is `Ring.break_wait_callback`: a worker `break_wait` runs it, and
+the thread that created the ring does not. The scheduler posts the host
+wake itself for a wake it requested, so that path does not run the hook
+twice.
 
 The callback is how a completion thread asks for another slice. Post it
 onto the host thread (a queued Qt signal, `loop.call_soon_threadsafe`).
