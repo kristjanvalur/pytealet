@@ -89,6 +89,15 @@ _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _PollManyCallback = Callable[[MultishotDelivery], object]
 _SetOp = Callable[[OpHandle], object]
 
+# one-deep, per thread, same shape as the ring's break_wait_callback_depth.
+# a hook that calls wake_wait again still signals the wait. it must not
+# re-enter the hook.
+_async_break_depth = threading.local()
+
+
+def _async_break_reentered() -> bool:
+    return getattr(_async_break_depth, "depth", 0) > 0
+
 
 class WakeupManager(Protocol):
     """Cross-thread wakeup primitive for proactor ``wait`` / ``wait_async``."""
@@ -1234,6 +1243,10 @@ class ProactorBase:
         A Qt ``exec`` on the threaded backend is that host. ``UringProactor``
         does not run it; its hook is ``Ring.break_wait_callback``. The
         threaded worker runs this hook after it drops the poll lock.
+        The hook is not re-entered on the thread already running it. On
+        that worker an exception goes to the delivery exception handler,
+        when one is set, and the poller stays up. On the caller it
+        propagates.
         """
 
         self._async_break = callback
@@ -1245,10 +1258,38 @@ class ProactorBase:
             return None
         return self._async_break
 
+    def _call_async_break(self, callback: Callable[[], object]) -> None:
+        # nested wake_wait has already signalled the wait. skip the hook.
+        if _async_break_reentered():
+            return
+        _async_break_depth.depth = 1
+        try:
+            callback()
+        finally:
+            _async_break_depth.depth = 0
+
+    def _report_async_break_error(self, exc: Exception) -> None:
+        """Report a hook failure that must not kill the selector worker.
+
+        No handler: drop it, as a nowait send does. The poller still stays
+        up. A scheduler installs ``call_exception_handler`` here.
+        """
+
+        handler = self._delivery_exception_handler
+        if handler is None:
+            return
+        handler(
+            {
+                "message": "Exception in async break callback",
+                "exception": exc,
+                "proactor": self,
+            }
+        )
+
     def _run_async_break(self) -> None:
         break_cb = self._external_break()
         if break_cb is not None:
-            break_cb()
+            self._call_async_break(break_cb)
 
     def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
         """Bind this proactor to an asyncio event loop for async waits."""
@@ -2660,9 +2701,15 @@ class ThreadedSelectorProactor(SelectorProactor):
         ``set_async_break`` is the extra poke for a host in its own loop,
         such as Qt ``exec``. The selector worker queues that hook until
         ``_poll`` drops the proactor lock. Any other thread runs it now.
+        A hook already on this thread's stack is not called again; the
+        event signal above still runs. An exception on the worker is
+        reported and the poller stays up. On any other thread it propagates.
         """
 
         self._completed_wait.wakeup()
+        # the signal above is the re-entrant wake. do not queue or call again.
+        if _async_break_reentered():
+            return
         callback = self._external_break()
         if callback is None:
             return
@@ -2671,13 +2718,22 @@ class ThreadedSelectorProactor(SelectorProactor):
             if deferred is not None:
                 deferred.append(callback)
                 return
-        callback()
+            self._run_worker_async_break(callback)
+            return
+        self._call_async_break(callback)
+
+    def _run_worker_async_break(self, callback: Callable[[], object]) -> None:
+        # Exception only. SystemExit and KeyboardInterrupt still leave the thread.
+        try:
+            self._call_async_break(callback)
+        except Exception as exc:
+            self._report_async_break_error(exc)
 
     def _deliver_async_breaks(self, pending: list[Callable[[], object]]) -> None:
         callbacks = pending.copy()
         pending.clear()
         for callback in callbacks:
-            callback()
+            self._run_worker_async_break(callback)
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()

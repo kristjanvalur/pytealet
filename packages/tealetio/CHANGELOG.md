@@ -41,8 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ThreadedSelectorProactor.wake_wait()`` runs ``set_async_break()`` after
   it signals ``EventWakeupManager``, so a host parked in its own loop, such
   as a Qt ``exec``, hears a worker wake. A call from the worker runs the
-  hook after the poll lock is released. ``UringProactor`` assigns the same
-  callback to ``Ring.break_wait_callback``; a worker ``break_wait`` runs
+  hook after the poll lock is released. The hook does not re-enter. On the
+  worker, an exception from it goes to the delivery exception handler and
+  the poller keeps running. On the caller, it propagates.
+  ``UringProactor`` assigns the same callback to
+  ``Ring.break_wait_callback``; a worker ``break_wait`` runs
   it, and the creating thread's call does not. A wake the scheduler itself
   requests still posts the host callback once.
 - ``run_until_complete`` / ``arun_until_complete`` call ``stop()`` when the

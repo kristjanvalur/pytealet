@@ -626,8 +626,10 @@ Hosts that cannot watch an fd can fall back to a `Ring.poll()` helper.
 async waits. `wake_wait()` signals that event and runs `set_async_break()`
 when one is installed, so a host parked in its own loop (a Qt `exec`) hears
 the selector worker. The worker runs that hook after it drops the poll lock.
-`SelectorProactor.wait_async()` still runs `wait()` in a thread-pool executor
-and runs the same hook from `wake_wait()`.
+The hook does not re-enter. An exception on the worker goes to the delivery
+exception handler, when one is set, and the poller keeps running. On the
+caller it propagates. `SelectorProactor.wait_async()` still runs `wait()` in a
+thread-pool executor and runs the same hook from `wake_wait()`.
 
 ## Blocking IO facade (`scheduler.io`)
 
