@@ -4037,7 +4037,7 @@ class TestSchedulerExamples:
         s.run()
         assert seen == ["callback", 0]
 
-    def test_call_soon_threadsafe_on_live_turn_does_not_break_wait(self):
+    def test_call_soon_threadsafe_on_live_turn_breaks_without_waking_the_host(self):
         class Probe(BasicScheduler):
             def __init__(self) -> None:
                 super().__init__()
@@ -4050,15 +4050,20 @@ class TestSchedulerExamples:
         s = Probe()
         set_scheduler(s)
         seen: list[object] = []
+        wakes: list[str] = []
+        s.set_driver_wakeup(lambda: wakes.append("host"))
 
         def worker() -> None:
+            # spawn before run() already posted the host. count only this call.
+            wakes.clear()
             before = s.breaks
             s.call_soon_threadsafe(seen.append, "queued")
             seen.append(s.breaks - before)
 
         s.spawn(worker)
         s.run()
-        assert seen == [0, "queued"]
+        assert seen == [1, "queued"]
+        assert wakes == []
 
     def test_owner_calls_between_slices_break_wait_and_wake_the_host(self):
         class Probe(BasicScheduler):

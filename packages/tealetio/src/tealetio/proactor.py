@@ -1664,7 +1664,11 @@ class SelectorProactor(ProactorBase):
             self._detach_owner_hooks()
 
     def wake_wait(self) -> None:
-        """Wake a thread blocked in `wait`."""
+        """Write the wakeup socketpair and run ``set_async_break``.
+
+        ``wait`` is blocked in ``select`` on that reader. A byte written
+        before ``select`` stays readable, so the break is sticky.
+        """
 
         self._wake_selector()
         self._run_async_break()
@@ -4010,6 +4014,16 @@ class ProactorScheduler(BaseScheduler):
         proactor.set_async_break(self._external_wakeup)
 
     def _break_wait(self) -> None:
+        """Call ``Proactor.wake_wait`` for the parked ``wait`` or ``wait_async``.
+
+        ``SelectorProactor`` writes its wakeup socketpair; ``wait`` is inside
+        ``select`` on that reader. ``ThreadedSelectorProactor`` sets the
+        ``EventWakeupManager`` that ``wait`` parks on. The worker's own
+        ``select`` is a separate socketpair wake. ``UringProactor`` calls
+        ``ring.break_wait`` for ``wait`` / ``wait_idle``, and when threaded
+        also sets an ``EventWakeupManager`` for ``wait_async``.
+        """
+
         proactor = self._proactor
         assert proactor is not None
         proactor.wake_wait()

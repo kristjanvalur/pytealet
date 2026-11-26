@@ -90,17 +90,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slice the owner thread reads those queues before it parks again. A host
   that drives with ``turn()`` receives ``set_driver_wakeup`` for those
   wakes, including a spawn on the host thread between slices.
-- ``call_soon_threadsafe`` and ``call_on_scheduler`` share one wake. Another
-  thread always breaks the wait. The owner breaks it outside a slice, where
-  a host may be about to park, and while the loop is inside its own wait.
-  During a slice the owner reads the queue before it parks.
-  ``call_on_scheduler`` still runs on the owner stack and does not copy
-  context. ``call_soon_threadsafe`` still queues and copies context. The
-  owner is the thread inside ``running()``, ``run()``, or ``arun()``,
-  including the gaps between slices. A ``PulseEvent.set`` on that thread
-  during the loop's wait is serviced when the wait returns. Hosted ``arun``
-  runs an owner callback on the asyncio stack. That callback may queue
-  runnable work and must not switch tealets there.
+- ``call_soon_threadsafe`` always breaks the backend wait, including on
+  the owner thread during a slice, and the break sticks until the next
+  park. The runner's first Ctrl+C uses that path. ``set_driver_wakeup``
+  stays quiet during the slice. ``call_on_scheduler`` still runs on the
+  owner stack and does not copy context. It does not break during a
+  slice: the owner reads the queue before it parks. It breaks outside a
+  slice, where a host may be about to park, and while the loop is inside
+  its own wait. Another thread always breaks and posts the host callback.
+  ``call_soon_threadsafe`` still queues and copies context. The owner is
+  the thread inside ``running()``, ``run()``, or ``arun()``, including
+  the gaps between slices. A ``PulseEvent.set`` on that thread during the
+  loop's wait is serviced when the wait returns. Hosted ``arun`` runs an
+  owner ``call_on_scheduler`` callback on the asyncio stack. That callback
+  may queue runnable work and must not switch tealets there.
 - ``IOManager.accept_sockets`` no longer wakes the driver after the
   accept handler. With ``auto_submit`` on, the worker publishes the
   SQEs that handler prepared.

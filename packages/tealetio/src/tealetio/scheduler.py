@@ -1915,9 +1915,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         Not cancellable: once queued, the callback runs (or the scheduler
         stops). Same-thread only, and only while a scheduler turn is live
         (a task or callback drain). The driver is not waiting, so this does
-        not ``break_wait``. Use ``call_soon_threadsafe`` from another thread
-        or from asyncio while ``arun`` is parked. Use ``call_on_scheduler``
-        for a worker completion that has no context to keep.
+        not ``break_wait``. Use ``call_soon_threadsafe`` from another thread,
+        a signal handler, or asyncio while ``arun`` is parked. Use
+        ``call_on_scheduler`` for a worker completion that has no context
+        to keep.
         """
 
         if context is None:
@@ -1930,19 +1931,20 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         *args: object,
         context: contextvars.Context | None = None,
     ) -> None:
-        """Queue `callback(*args)` for a later drain and wake like `call_on_scheduler`.
+        """Queue `callback(*args)` for a later drain and always break the wait.
 
-        Copies context. The callback does not run on this stack. Another
-        thread always wakes. The owner thread wakes outside a slice, and
-        while this loop is inside its own wait. During a slice the owner
-        reads the queue before it parks. Use ``call_on_scheduler`` when the
-        caller has no tealet context to keep.
+        Copies context. The callback does not run on this stack. The backend
+        break runs on every thread, including the owner during a slice, so a
+        queued callback is not slept through. ``set_driver_wakeup`` stays
+        quiet while that owner is inside a slice. Use ``call_on_scheduler``
+        when the caller has no tealet context to keep and the owner should
+        run the callback inline.
         """
 
         if context is None:
             context = contextvars.copy_context()
         self._ready_callbacks.append((callback, args, context))
-        self._wake_unless_owner_driving()
+        self._wake_unless_owner_driving(always_break=True)
 
     def call_on_scheduler(
         self,
@@ -1953,11 +1955,13 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         The owner thread is the thread inside ``running()``, ``run()``, or
         ``arun()``, including the gaps between ``turn`` slices. That thread
-        runs the callback on this stack. Any other thread queues it. The
-        wake matches ``call_soon_threadsafe``: another thread always wakes,
-        and the owner wakes outside a slice or while this loop is inside its
-        own wait. The callback may queue runnable work. It must not switch
-        tealets from an asyncio stack or from inside that wait.
+        runs the callback on this stack. Any other thread queues it. Another
+        thread always wakes. The owner wakes outside a slice or while this
+        loop is inside its own wait. During the rest of a slice the owner
+        reads the queue before it parks. ``call_soon_threadsafe`` always
+        breaks, including during that slice. The callback may queue runnable
+        work. It must not switch tealets from an asyncio stack or from
+        inside that wait.
         """
 
         if threading.get_ident() == self._owner_thread:
@@ -2492,15 +2496,18 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 return self.time()
             return self._next_timer_deadline()
 
-    def _wake_unless_owner_driving(self) -> None:
-        # one wake for call_soon_threadsafe, call_on_scheduler, stop, timers,
-        # and _make_runnable. the owner inside a slice reads the queues
-        # before it parks, so that case returns. inside this loop's own wait
-        # the backend wait must break, and the host is already on the stack.
-        # outside a slice the break sticks and set_driver_wakeup runs. any
-        # other thread always wakes. before running() the owner is unset.
+    def _wake_unless_owner_driving(self, *, always_break: bool = False) -> None:
+        # call_on_scheduler, stop, timers, and _make_runnable. the owner
+        # inside a slice reads the queues before it parks, so that case
+        # returns. call_soon_threadsafe passes always_break: the backend
+        # break sticks even then, so a signal handler on this thread cannot
+        # queue work the next park sleeps through. the host callback stays
+        # quiet during the slice either way. inside this loop's own wait
+        # the break runs and the host is already on the stack. outside a
+        # slice the break sticks and set_driver_wakeup runs. any other
+        # thread always wakes. before running() the owner is unset.
         owner_in_turn = self._in_turn and threading.get_ident() == self._owner_thread
-        if owner_in_turn and not self._in_internal_wait:
+        if owner_in_turn and not self._in_internal_wait and not always_break:
             return
         # the proactor hook would post the same host callback. this method
         # decides that, including staying quiet while the owner is in a slice.
@@ -2530,17 +2537,11 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
     @abstractmethod
     def _break_wait(self) -> None:
-        """Wake a parked backend wait. Safe from any thread.
+        """Unblock the driver's parked wait. A break before the park stays visible.
 
-        ``call_soon`` never wakes. ``call_soon_threadsafe``,
-        ``call_on_scheduler``, ``stop``, ``_make_runnable``, and timer
-        enqueue use ``_wake_unless_owner_driving``. That breaks this wait
-        and, except while the owner is inside a slice, runs the host wakeup
-        from ``set_driver_wakeup``. During a slice the owner reads its
-        queues before the next park. Inside this loop's own wait the break
-        still runs and the host callback does not. ``_owner_thread`` is
-        ``None`` outside ``running()`` / ``run`` / ``arun``, so those
-        callers wake too.
+        ``BasicScheduler`` sets the ``threading.Event`` that ``_wait_thread``
+        waits on. ``ProactorScheduler`` calls ``Proactor.wake_wait`` and has
+        no event of its own. Who may call this is ``_wake_unless_owner_driving``.
         """
 
 
@@ -2562,6 +2563,11 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait(self) -> None:
+        """Set the event ``_wait_thread`` waits on.
+
+        The set stays until that wait, or until ``_poll_io`` consumes it.
+        """
+
         self._wakeup.set()
 
     def _poll_io(self) -> None:

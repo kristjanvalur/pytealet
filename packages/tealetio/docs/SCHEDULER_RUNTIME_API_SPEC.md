@@ -852,9 +852,11 @@ Status: Implemented for current sync/async scheduler drivers.
   while they run, including `call_later(0)`, waits for
   the next drain.
   `call_soon` is not cancellable, does not return a handle, and does not
-  `break_wait`. `call_soon_threadsafe` copies context and queues.
+  `break_wait`. `call_soon_threadsafe` copies context, queues, and always
+  breaks the backend wait, including on the owner thread during a slice.
+  The host callback stays quiet during that slice.
   `call_on_scheduler` does not copy context. The owner thread runs it on
-  the current stack. Any other thread queues it. Both then call
+  the current stack. Any other thread queues it. It then calls
   `_wake_unless_owner_driving`, as do `stop()`, `_make_runnable`, and timer
   enqueue. Another thread always wakes. The owner wakes outside a slice,
   and while `_in_internal_wait` is set (the flag around `_driver_wait` in
@@ -906,7 +908,9 @@ Status: Implemented.
   `_break_wait` forwards to it (one method; safe from any thread). Production
   IO wakes through operation `add_done_callback` → `call_soon_threadsafe` →
   `_break_wait` → `wake_wait()`, not proactor-internal completion hooks.
-  `call_soon` does not `_break_wait`. `call_later` / `_make_runnable` use
+  `call_soon` does not `_break_wait`. `call_soon_threadsafe` always does,
+  including on the owner thread during a slice, and does not post
+  `set_driver_wakeup` during that slice. `call_later` / `_make_runnable` use
   `_wake_unless_owner_driving`: another thread, the owner outside a slice,
   and the owner while `_in_internal_wait` is set.
 - `AsyncProactorScheduler` delegates `wait_async()` to the proactor backend.
