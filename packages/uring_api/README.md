@@ -279,7 +279,9 @@ and not a `break_wait`) then parks again, without another submit. A timed
 wait keeps the original deadline and parks with the time still left. `wait(0)`
 runs that flush and returns; it does not park again. There is no further
 flush on the way out, in callback mode or in pull mode. An SQE another thread
-queued during the burst waits until the next `wait()` or `submit()`.
+queued during the burst does not by itself cause that flush. When this
+thread's count did move, it is submitted with the tail. It stays queued
+only when the burst did not move the count.
 `break_wait` still returns: a wake NOP, or a sticky latch taken before the
 reaper entered the kernel, is not retried.
 

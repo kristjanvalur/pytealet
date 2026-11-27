@@ -190,7 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flush before the first reap still runs once, before the call parks:
   a queue that is already waitable is submitted, including SQEs another
   thread prepared before the call. An SQE another thread queues during
-  the burst stays until the next ``wait()`` or ``submit()``. A burst
+  the burst does not by itself cause that post-burst flush. When this
+  thread's count did move, that SQE is submitted with the tail. It stays
+  queued only when the burst did not move the count. A burst
   that prepared nothing does not enter. A blocking or timed wait that
   delivered nothing, and was not a ``break_wait``, parks again after
   that flush.
