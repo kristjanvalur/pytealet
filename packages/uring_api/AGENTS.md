@@ -299,8 +299,8 @@ pointer), not a second stored `user_data`.
   the same count around each burst and submits after the burst when it
   moved. The flush before the first reap stays: a plain ring uses
   `sq_waitable`, and `SQPOLL` publishes an unpublished tail, including a
-  nowait-only queue. The post-burst flush is the last submit in that
-  call. `prepare()` stays lazy, so
+  nowait-only queue. A silent repark does not submit again before the
+  next reap, and `wait()` does not flush on the way out. `prepare()` stays lazy, so
   several operations from one callback share that enter. On a free-threaded build the
   callback overlaps the waiter; on the GIL the same hole opens if the callback
   drops the GIL before `prepare`. A callback that returns before any waiter is
@@ -355,8 +355,9 @@ pointer), not a second stored `user_data`.
   direct nowait close, shutdown, poll_remove, or a silenced multishot
   cancel, without the unique-waiter or `driver_blocks` gates. Single-thread
   `wait()` publishes before the first reap, and again after a burst when
-  `ring_thread_publish_sqes` moved. That post-burst flush is the last
-  submit in the call. Under `SQPOLL` the
+  `ring_thread_publish_sqes` moved. A silent repark does not submit
+  again before the next reap, and `wait()` does not flush on the way
+  out. Under `SQPOLL` the
   entry flush still publishes an unpublished tail, including a nowait-only
   queue, before the thread blocks. liburing copies the tail
   when its userspace head is behind and skips the enter when that copy
