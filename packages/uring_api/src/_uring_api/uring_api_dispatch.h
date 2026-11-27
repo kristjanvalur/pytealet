@@ -14,7 +14,7 @@ enum {
 /*
  * Opens wait_idle immediately. Submits a wake NOP unless completion service is
  * active (workers already reap the CQ). force_nop=1 always submits (stop_serving).
- * The owner skip returns before the park. A completion does not call this.
+ * The owner skip returns before the park.
  * Returns 0 or -1 with exception set.
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop);

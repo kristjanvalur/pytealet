@@ -315,8 +315,7 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
  * skipped (idle park only) unless force_nop is set — stop_serving needs a NOP to
  * interrupt workers blocked in the kernel wait. When the SQ is full, NOP failure
  * is ignored: a real CQE will arrive soon enough. The idle park never waits on
- * the NOP path. The owner skip returns before the park. A completion does
- * not call this. The host wakes any loop that is not wait_idle.
+ * the NOP path. The owner skip returns before the park.
  */
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;

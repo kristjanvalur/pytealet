@@ -577,8 +577,8 @@ ring critical section already serialises who writes an SQE.
 ## Still open
 
 - Default `SINGLE_ISSUER` on `SyncUringProactor` only if that host is
-  the only task that enters. A worker enter is `OSError`. There is no
-  path that publishes a slot the worker filled and could not enter.
+  the only task that enters. A worker enter is `OSError`, and the filled
+  SQE stays unpublished.
 - **send-all + `send_zc`.** Use `IORING_OP_SEND_ZC` for legs when probed
   (kernel 6.0+). This is not a flag on the current op: it changes the CQE
   machine.

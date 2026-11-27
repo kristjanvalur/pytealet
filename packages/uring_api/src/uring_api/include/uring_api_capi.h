@@ -15,11 +15,10 @@
 
 /*
  * Pre-release: ABI version stays 1 while the package is unreleased (see
- * packages/uring_api/AGENTS.md). Vtable *signatures* may still change — rebuild
- * every C client after pulling. Notable breaks vs early v1 drafts:
- *   - ring_submit_* / ring_submit_*_nowait removed; C clients construct then
- *     ring_prepare(). Python Ring.prepare_* is construct+prepare sugar.
- *   - ring_set_pre_submit / ring_set_c_pre_submit removed
+ * packages/uring_api/AGENTS.md). Vtable signatures may still change — rebuild
+ * every C client after pulling. Current shape:
+ *   - C clients construct, then ring_prepare(). Python Ring.prepare_* is
+ *     construct+prepare sugar.
  *   - ring_construct_recv_multishot / accept_multishot do not take
  *     base_sequence; set completion.sequence after construct
  *   - ring_construct_recv / recvmsg take flags (POLL_FIRST and friends)
@@ -27,13 +26,12 @@
  *     prepare links it for every kind. send_all reapplies the same relative
  *     timeout on each leg; it is not a deadline for the whole drain.
  *     UringApiTimespec is tv_sec plus tv_nsec; {0, 0} is already expired
- *   - Python prepare and construct methods: cargo then user_data last
- *     (aligns with C). Python multishot construct/prepare also take optional
- *     base_sequence after user_data.
- *   - C completion callback receives one Completion per call (was a list of
- *     one kernel drain batch)
- *   - completion_clear_user_data removed; use completion_take_user_data
- *     (or completion_set_user_data with None)
+ *   - Python prepare and construct methods: cargo then user_data last.
+ *     Python multishot construct/prepare also take optional base_sequence
+ *     after user_data.
+ *   - A C completion callback receives one Completion per call.
+ *   - completion_take_user_data returns and clears user_data.
+ *     completion_set_user_data(None) clears it without returning the payload.
  * Clients must check abi_version, struct_size, and null-check pointers they use.
  */
 #define URING_API_CAPI_ABI_VERSION 1u
