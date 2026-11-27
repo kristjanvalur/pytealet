@@ -281,7 +281,8 @@ pointer), not a second stored `user_data`.
   for a waitable SQE. A non-waitable-only batch does not enter even then.
   That is the non-SQPOLL rule. There is no host wake for a worker that
   filled an SQE. A forbidden enter is `OSError` (`EEXIST`) on that worker.
-  `break_wait_callback` runs only from `break_wait` and `stop_serving`.
+  A completion does not open the idle park, and the ring has no host
+  wakeup hook. `pending_count()` does not end a wait.
   SQPOLL publishes any SQE the handler kept,
   including that batch, when the handler returns.
   One per-thread count, snapshotted at handler entry
@@ -540,9 +541,8 @@ get_sqe_try/re-validate protocol across prepare).
   `Ring(skip_owner_break_wait=False)` keeps the sticky wake for a waiter on
   another thread (inline `wait_async`). The latch must stick before that
   thread parks. There is no setter and no `URING_API_SKIP_OWNER_BREAK_WAIT`.
-  A call that opened the park then runs `break_wait_callback` when set.
-  The owner skip does not. A nested call from the callable still opens
-  the park and does not run the callable again.
+  `break_wait()` does not call into the host. A completion does not open
+  the park.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler

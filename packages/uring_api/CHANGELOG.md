@@ -11,10 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- ``Ring.break_wait_callback`` is an optional callable with no arguments.
-  ``break_wait()`` runs it after opening the idle park, including
-  ``stop_serving()``. A call that ``skip_owner_break_wait`` drops does
-  not run it. It does not run because a worker filled an SQE.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
@@ -38,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays the caller's. Close is not rewritten. A waitable or
   ``skip_success`` failure does not mark the fd. An idle fd does not park
   those operations.
+
+### Removed
+
+- ``Ring.break_wait_callback`` is gone. ``break_wait()`` still opens the
+  ``wait_idle`` park, and when no completion service is running it may
+  submit one wake NOP so a ``wait()`` on an empty completion queue can
+  return. It does not call into the host. A host that is not parked in
+  ``wait_idle`` wakes its own loop when it has queued driver work. A
+  completion that finishes, including a nowait ``send_all`` that leaves
+  nothing in flight, does not open that park. ``pending_count()`` reports
+  in-flight work. It does not end a wait.
 
 ### Fixed
 

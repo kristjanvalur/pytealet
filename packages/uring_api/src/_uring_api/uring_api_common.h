@@ -320,9 +320,6 @@ struct UringApiRing {
     PyObject *delivery_exception_handler;
     /* optional: hook(context) when a nowait CQE fails (res < 0) */
     PyObject *nowait_error_handler;
-    /* optional: no-arg callable. break_wait runs it after opening the idle
-     * park. stop_serving uses that same path. */
-    PyObject *break_wait_callback;
     UringApiCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK

@@ -315,48 +315,9 @@ static int consume_cqe(UringApiRing *self, struct io_uring_cqe *cqe, UringApiSta
  * skipped (idle park only) unless force_nop is set — stop_serving needs a NOP to
  * interrupt workers blocked in the kernel wait. When the SQ is full, NOP failure
  * is ignored: a real CQE will arrive soon enough. The idle park never waits on
- * the NOP path. A call that opened the park then runs break_wait_callback.
- * The owner skip does not.
+ * the NOP path. The owner skip returns before the park. A completion does
+ * not call this. The host wakes any loop that is not wait_idle.
  */
-static _Thread_local int break_wait_callback_depth;
-
-static int ring_call_break_wait_callback(PyObject *callback) {
-    PyObject *result;
-
-    if (break_wait_callback_depth) {
-        return 0;
-    }
-    break_wait_callback_depth++;
-    result = PyObject_CallNoArgs(callback);
-    break_wait_callback_depth--;
-    if (result == NULL) {
-        return -1;
-    }
-    Py_DECREF(result);
-    return 0;
-}
-
-/* 0 ok, -1 if the callback raised. Caller does not hold the ring CS. */
-static int ring_notify_break_wait_callback(UringApiRing *self) {
-    PyObject *callback = NULL;
-    int ret;
-
-    if (break_wait_callback_depth) {
-        return 0;
-    }
-    Py_BEGIN_CRITICAL_SECTION(self);
-    if (self->break_wait_callback != NULL) {
-        callback = Py_NewRef(self->break_wait_callback);
-    }
-    Py_END_CRITICAL_SECTION();
-    if (callback == NULL) {
-        return 0;
-    }
-    ret = ring_call_break_wait_callback(callback);
-    Py_DECREF(callback);
-    return ret;
-}
-
 int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     struct io_uring_sqe *sqe;
     int fatal = 0;
@@ -392,7 +353,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
     UringApiIdlePark_signal(&self->idle);
 
     if (!want_nop) {
-        goto notify;
+        return 0;
     }
 
     /* stop_serving (force_nop) must kick a worker blocked in wait_cqe.
@@ -406,7 +367,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         need_nop = self->cqe_waiter_in_enter;
         pthread_mutex_unlock(&self->cqe_mu);
         if (!need_nop) {
-            goto notify;
+            return 0;
         }
     }
 
@@ -442,8 +403,7 @@ int UringApiRing_break_wait_impl(UringApiRing *self, int force_nop) {
         Py_END_CRITICAL_SECTION();
     }
 
-notify:
-    return ring_notify_break_wait_callback(self);
+    return 0;
 }
 
 PyObject *UringApiRing_break_wait(UringApiRing *self, PyObject *Py_UNUSED(ignored)) {

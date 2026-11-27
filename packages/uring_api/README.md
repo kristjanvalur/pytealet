@@ -903,13 +903,14 @@ would drop the early wake. Assigning `ring.skip_owner_break_wait` raises
 `AttributeError`. `stop_serving()` still posts its NOP from the creating
 thread.
 
-`break_wait_callback` is for a host that does not park in `wait_idle`.
-`break_wait()` runs it after opening the idle park, including
-`stop_serving()`. A call that `skip_owner_break_wait` drops does not run
-it. A nested `break_wait()` from the callable still opens the park and
-does not run the callable again. It does not run because a worker filled
-an SQE. A worker publish the kernel rejects is `OSError` on that worker.
-A direct nowait that is not parked is still left for a later `submit()`.
+`break_wait()` does not call into the host. A host parked in its own loop
+wakes that loop itself when it has queued driver work. A finished
+completion does not open the park, including a nowait send that leaves
+`pending_count()` at zero. That count reports in-flight work. A waiter
+returns when a completion it asked to be told about is delivered, when
+`break_wait()` runs, or when its timeout elapses. A worker publish the
+kernel rejects is `OSError` on that worker. A direct nowait that is not
+parked is still left for a later `submit()`.
 
 `wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
 `break_wait()`, but only one host may park at a time (the proactor driver).
