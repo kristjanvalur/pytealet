@@ -232,17 +232,16 @@ or prepare a waitable SQE and let the next flush take both: the queue is
 ordered, so a non-waitable SQE already ahead of that waitable one rides the
 same enter. `SQPOLL` publishes an unpublished tail before that reap,
 including a nowait-only queue. The unique CQ waiter uses that same before-reap
-rule before it parks in `io_uring_wait_cqe`. After it has delivered a completion
-callback, the service thread submits once when that handling filled a waitable
-SQE and the waiter is already held, including while the waiter is blocked in
-the kernel. That covers the next send, the first leg of a send-all, a cancel
-that marks the queue waitable, and a close, shutdown, or poll_remove filled
-from a park. On a plain ring, a direct close, shutdown, poll_remove, or other
-non-waitable stays queued for `submit()`, a full submission queue, or a later
-flush that also carries a waitable SQE. `SQPOLL` publishes any SQE the handler
-kept, including a direct nowait, when the handler returns. When the handling
-did fill a waitable SQE, the whole ordered queue is entered, so a non-waitable
-already in it rides along. The host parked
+rule before it parks in `io_uring_wait_cqe`. On a plain ring, after a
+completion callback the service thread submits once when that handling filled
+a waitable SQE and the unique waiter is already held, including while the
+waiter is blocked in the kernel. That covers the next send, the first leg of
+a send-all, a cancel that marks the queue waitable, and a close, shutdown, or
+poll_remove filled from a park. A direct close, shutdown, poll_remove, or
+other non-waitable stays queued for `submit()`, a full submission queue, or a
+later flush that also carries a waitable SQE. When the handling did fill a
+waitable SQE, the whole ordered queue is entered, so a non-waitable already
+in it rides along. The host parked
 in `wait_idle` does not submit again until something completes, so a waitable
 batch has to be entered before the callback's thread goes back to waiting.
 `prepare()` only fills, so several operations from one callback share the
@@ -252,7 +251,9 @@ fill afterwards. A link-timeout SQE does not count on its own. A callback that
 prepared no waitable SQE does not enter, and leaves another thread's queue for
 the harvest flush or for `submit()`. If the callback returns before any waiter
 is held, the SQEs stay queued for host `submit()` or for a later flush that
-finds the queue waitable.
+finds the queue waitable. Under `SQPOLL` the handler publishes when it
+returns if this thread kept any SQE, including a direct nowait. That publish
+does not check the unique waiter or whether the host is parked.
 `auto_submit=False`
 means `wait()` and a completion handler do not publish a caller `prepare()`
 on their own. `make_room`
