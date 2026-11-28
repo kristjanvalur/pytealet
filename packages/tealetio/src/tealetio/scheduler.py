@@ -1418,31 +1418,6 @@ class _RunnableLink(_tasks.TaskLink):
         self._scheduler._runnable.on_modified(task)
 
 
-# set while a proactor worker polls under its lock. host wakeups queue here
-# and run after the lock is released.
-_host_wakeup_defer = threading.local()
-
-
-@contextmanager
-def _defer_host_wakeups(pending: list[tuple[BaseScheduler, Callable[[], object]]]):
-    """Queue host wakeups on this thread until the block exits."""
-
-    previous = getattr(_host_wakeup_defer, "pending", None)
-    _host_wakeup_defer.pending = pending
-    try:
-        yield
-    finally:
-        _host_wakeup_defer.pending = previous
-
-
-def _deliver_deferred_host_wakeups(
-    pending: list[tuple[BaseScheduler, Callable[[], object]]],
-) -> None:
-    for scheduler, callback in pending:
-        scheduler._invoke_host_wakeup(callback)
-    pending.clear()
-
-
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduling mechanics for concrete drivers."""
 
@@ -2475,10 +2450,6 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._break_wait()
         callback = self._host_wakeup
         if callback is None or owner_in_turn:
-            return
-        deferred = getattr(_host_wakeup_defer, "pending", None)
-        if deferred is not None:
-            deferred.append((self, callback))
             return
         self._invoke_host_wakeup(callback)
 

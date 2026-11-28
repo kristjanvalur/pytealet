@@ -35,8 +35,6 @@ from .scheduler import (
     RunnableQueueFactory,
     SyncDrivingMixin,
     SyncSchedulerDrivingAPI,
-    _defer_host_wakeups,
-    _deliver_deferred_host_wakeups,
 )
 from .socket_helpers import configure_scheduler_socket, set_tcp_nodelay, socket
 from .types import IoExpect, IoMore, RecvResult
@@ -2686,14 +2684,11 @@ class ThreadedSelectorProactor(SelectorProactor):
 
     def _worker_main(self) -> None:
         while not self._worker_stop.is_set():
-            deferred: list[tuple[BaseScheduler, Callable[[], object]]] = []
             try:
-                with self._lock, _defer_host_wakeups(deferred):
+                with self._lock:
                     self._poll(None)
             except (OSError, ValueError, RuntimeError):
-                _deliver_deferred_host_wakeups(deferred)
                 return
-            _deliver_deferred_host_wakeups(deferred)
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_wait.wait(timeout=timeout)

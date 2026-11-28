@@ -244,10 +244,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``turn()`` is future work. ``turn()`` does not grow a pending-IO check:
   ``has_pending_operations()`` is a helper for ``run()`` and ``arun()``,
   and on uring it is not a reliable idle signal.
-- A ``set_driver_wakeup`` callback runs after
-  ``ThreadedSelectorProactor`` releases its poll lock. An exception from
-  the callback is reported through the scheduler exception handler, and
-  the worker keeps reaping.
+- An exception from a ``set_driver_wakeup`` callback is reported through
+  the scheduler exception handler, and the worker keeps reaping.
 - A queue ``put`` or ``get`` that is woken and then cancelled passes the
   free slot, or the item already in the queue, to the next waiter. The
   item moves only after the wait returns, so a raised ``put`` still
