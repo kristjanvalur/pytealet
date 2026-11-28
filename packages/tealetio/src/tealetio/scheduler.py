@@ -2448,23 +2448,19 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         if owner_in_turn and not self._in_internal_wait and not always_break:
             return
         self._break_wait()
-        callback = self._host_wakeup
-        if callback is None or owner_in_turn:
-            return
-        self._invoke_host_wakeup(callback)
-
-    def _invoke_host_wakeup(self, callback: Callable[[], object]) -> None:
-        """Run the host wakeup. Failures stay off the reaper thread."""
-
-        try:
-            callback()
-        except Exception as exc:
-            self.call_exception_handler(
-                {
-                    "message": "Exception in driver wakeup callback",
-                    "exception": exc,
-                }
-            )
+        # If the current thread is not the owner driving, invoke the host wakeup callback.
+        if not owner_in_turn:
+            callback = self._host_wakeup
+            if callback is not None:
+                try:
+                    callback()
+                except Exception as exc:
+                    self.call_exception_handler(
+                        {
+                            "message": "Exception in driver wakeup callback",
+                            "exception": exc,
+                        }
+                    )
 
     @abstractmethod
     def _break_wait(self) -> None:
