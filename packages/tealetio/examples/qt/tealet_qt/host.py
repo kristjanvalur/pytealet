@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 
-from tealetio import Scheduler, ThreadedSelectorProactor, UringProactor, set_scheduler
+from tealetio import Future, Runner, Scheduler, Task, ThreadedSelectorProactor, UringProactor, set_scheduler
 
 from ._qt import QApplication, QObject, Qt, QTimer, Signal
 
@@ -75,6 +75,8 @@ class QtHost(QObject):
     def start(self) -> None:
         """Bind the wakeup and run the first slice before ``exec``."""
 
+        # stop() latches _stopped. a later run() on the same host starts clean.
+        self._stopped = False
         _require_threaded_proactor(self.scheduler.proactor)
         set_scheduler(self.scheduler)
         self.scheduler.set_driver_wakeup(self.notify)
@@ -119,37 +121,131 @@ class QtHost(QObject):
         self._timer.start(delay_ms)
 
 
+class QtScheduler(Scheduler):
+    """Scheduler whose driver is ``QApplication.exec``.
+
+    Same shape as ``qasync.QEventLoop``. ``run_forever`` and
+    ``run_until_complete`` park in ``exec``. The done callback calls
+    ``stop``. ``run_until_complete`` returns the target's result. The
+    code from ``exec`` is discarded. A normal ``Runner`` is the session::
+
+        with Runner(scheduler_factory=QtScheduler) as runner:
+            runner.run(main)
+
+    ``Runner.close`` calls ``run_until_complete`` again for leftovers, so
+    that call is this method as well. ``host`` is the ``QtHost``.
+    """
+
+    def __init__(self, proactor_factory=None, *, argv: list[str] | None = None, runnable_queue_factory=None) -> None:
+        super().__init__(proactor_factory, runnable_queue_factory=runnable_queue_factory)
+        app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
+        self._app = app
+        self.host = QtHost(self)
+        self._in_exec = False
+        self._quit_pending = False
+        self._quit_connected = False
+        app.aboutToQuit.connect(self.host.stop)
+        self._quit_connected = True
+
+    def close(self) -> None:
+        """Drop the quit hook, then release the proactor."""
+
+        self._disconnect_quit()
+        super().close()
+
+    def stop(self) -> None:
+        """Stop the driver. ``app.exit`` runs only while ``exec`` is on the stack."""
+
+        super().stop()
+        if self._in_exec:
+            self._app.exit()
+            return
+        # Qt drops an exit() that arrives before exec starts. The first
+        # timer inside exec performs this one.
+        self._quit_pending = True
+
+    def run_forever(self, *, yield_every: int | None = None) -> None:
+        """Park in ``QApplication.exec`` until ``stop`` or the last window."""
+
+        self._validate_yield_every(yield_every)
+        self._verify_current_scheduler()
+        self._run_exec()
+
+    def run_until_complete(self, future, *, yield_every: int | None = None):
+        """Run until ``future`` is done. ``exec`` returns when it completes."""
+
+        self._validate_yield_every(yield_every)
+        self._verify_current_scheduler()
+        with self.main_context():
+            target = self._coerce_target(future)
+        target.add_done_callback(self._exit_on_done)
+        try:
+            self._run_exec()
+        finally:
+            target.remove_done_callback(self._exit_on_done)
+        if not target.done():
+            raise RuntimeError("Scheduler stopped before Future completed.")
+        return target.result()
+
+    def _coerce_target(self, future):
+        # same entry rule as the blocking driver: spawn a callable before running().
+        if isinstance(future, Future):
+            if isinstance(future, Task) and future.get_scheduler() is not self:
+                raise RuntimeError("Future is bound to a different scheduler")
+            return future
+        if callable(future):
+            return self.spawn(future)
+        raise TypeError("future must be a Future or callable")
+
+    def _exit_on_done(self, _future) -> None:
+        self.stop()
+
+    def _begin(self) -> None:
+        """First event inside ``exec``. Start the host, then honour an early quit."""
+
+        self.host.start()
+        if self._quit_pending:
+            self._quit_pending = False
+            self._app.exit()
+
+    def _run_exec(self) -> None:
+        try:
+            with self.running():
+                # the entry runs on this timer, so a quit in that slice is
+                # inside exec. qasync's call_soon is the same 0 ms timer.
+                QTimer.singleShot(0, self._begin)
+                self._in_exec = True
+                try:
+                    self._app.exec()
+                finally:
+                    self._in_exec = False
+                # qasync follows exec with one processEvents. the window
+                # close queues the parked tealet and aboutToQuit has
+                # stopped the host, so this slice runs it.
+                self.turn()
+        finally:
+            self._quit_pending = False
+            self.host.stop()
+
+    def _disconnect_quit(self) -> None:
+        if not self._quit_connected:
+            return
+        self._quit_connected = False
+        try:
+            self._app.aboutToQuit.disconnect(self.host.stop)
+        except (RuntimeError, TypeError):
+            pass
+
+
 def run(main: Callable[[QtHost], None], argv: list[str] | None = None) -> int:
     """Host ``main`` as one tealet under ``QApplication.exec``.
 
-    ``main`` builds the windows and may spawn further tealets. This function
-    is the boilerplate around that: the application object, the scheduler,
-    and the loop. ``exec``'s code is the return value. An exception from
-    ``main`` propagates here.
+    ``main`` receives the ``QtHost``. This is a normal ``Runner`` around a
+    ``QtScheduler``. The return value is ``0``. An exception from ``main``
+    propagates.
     """
 
-    app = QApplication.instance() or QApplication(sys.argv if argv is None else argv)
-    scheduler = threaded_scheduler()
-    host = QtHost(scheduler)
-    set_scheduler(scheduler)
-    task = scheduler.spawn(lambda: main(host))
-    app.aboutToQuit.connect(host.stop)
-    try:
-        with scheduler.running():
-            host.start()
-            if task.done():
-                # main returned during the first slice, so there is no window to run.
-                code = 0
-            else:
-                code = app.exec()
-                # closing the window wakes the app tealet from between turns.
-                # aboutToQuit has stopped the host, so drain that wake here.
-                if not task.done():
-                    scheduler.turn()
-            if task.done():
-                task.result()
-            return int(code)
-    finally:
-        host.stop()
-        scheduler.close()
-        set_scheduler(None)
+    with Runner(scheduler_factory=lambda: QtScheduler(argv=argv)) as runner:
+        host = runner.get_scheduler().host
+        runner.run(lambda: main(host))
+        return 0

@@ -1,27 +1,32 @@
-# Future Qt host notes
+# Qt host notes
 
-This example is not a production package. Two later shapes are recorded
-here. Neither is part of `QtHost` today.
+This example is not a production package. `QtScheduler` is the host.
+An inline proactor under that host is still a later option, and it is
+not part of `QtHost`.
 
-## `QScheduler` in the shape of `QEventLoop`
+## `QtScheduler`
 
-A production `QScheduler.run_until_complete(main)` can follow
-`qasync.QEventLoop.run_until_complete` (v0.28.0). Create the task, call
-`QApplication.exec`, and `exit` when the task's done callback runs.
-`main` waits on the window. `run()` in the sense "return when the
-scheduler is idle" is the wrong lifetime: the process stays up because
-the window is open. `tealet_qt.run` is this host already, under a
-different name.
+```python
+with Runner(scheduler_factory=QtScheduler) as runner:
+    runner.run(main)
+```
 
-`exec` and `run_until_complete` live on the main tealet. Qt waits
-there. The deadline timer and the queued kick call `turn()`. `turn()`
-polls and, when a task is runnable, switches onto that task's stack.
-A park or the end of the batch switches back to the main tealet,
-`turn()` returns to the slot, and the slot returns to `exec`. The wait
-is Qt's poll on the main tealet. User tasks are the other stacks. The
-callback drain at the start of a slice also runs on the main tealet,
-before that switch. This path does not call `_wait_thread`, and it does
-not keep the scheduler's `while` loop on the stack across the wait.
+This follows `qasync.QEventLoop` (v0.28.0). The subclass owns the
+`QApplication`. `run_forever` calls `exec`. `run_until_complete` adds
+a done callback that calls `app.exit`, then calls `exec`. `Runner.run`
+is that second method. `main` waits on the window. `run()` in the
+sense "return when the scheduler is idle" is the wrong lifetime: the
+process stays up because the window is open.
+
+`exec` lives on the main tealet. Qt waits there. The deadline timer
+and the queued kick call `turn()`. `turn()` polls and, when a task is
+runnable, switches onto that task's stack. A park or the end of the
+batch switches back to the main tealet, `turn()` returns to the slot,
+and the slot returns to `exec`. The wait is Qt's poll on the main
+tealet. User tasks are the other stacks. The callback drain at the
+start of a slice also runs on the main tealet, before that switch.
+This path does not call `_wait_thread`, and it does not keep the
+scheduler's `while` loop on the stack across the wait.
 
 That is the same shape as `QEventLoop`. qasync's `exec` is the loop,
 and a timer or a ready socket runs an asyncio callback and returns to
@@ -30,14 +35,18 @@ completion back as a signal; `exec` is still the loop. Here the pump
 is `turn()` instead of that callback. The scheduler and its proactor
 stay in place underneath.
 
-After `exec`, qasync runs one `processEvents` and raises if the future
-is still pending. The future is usually already done, because its
-callback ran inside `exec` and that callback is what called `exit`.
-Closing our last window quits `exec` before the tealet parked on
-`finished` has been turned, and `aboutToQuit` has already stopped the
-host, so `tealet_qt.run` calls `turn` once more after `exec`. If the
-task finishes in the slice before `exec`, skip `exec`: `exit` has
-already been called.
+`Runner.close` calls `run_until_complete` again, for the cancelled
+leftovers and the executor shutdown. Those calls use this same
+`exec`. There is no second driver.
+
+`stop` calls `app.exit` only while `exec` is on the stack. A target
+that finished earlier is remembered, and the first event inside
+`exec` performs that quit. That event is a 0 ms timer, the same
+place as qasync's `call_soon`, and it starts the host. The code
+`exec` returns is discarded. `run_until_complete` returns the
+target's result. After `exec`, one `turn` runs the tealet the window
+close queued. `aboutToQuit` has stopped the host by then. qasync's
+matching step is one `processEvents`.
 
 ## Inline proactor
 
