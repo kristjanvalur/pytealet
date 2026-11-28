@@ -326,6 +326,19 @@ class TestTurnIo:
             scheduler.close()
             server.join(timeout=1)
 
+    def test_threaded_selector_spawn_between_slices_posts_the_host_once(self):
+        scheduler = SyncProactorScheduler(proactor_factory=ThreadedSelectorProactor)
+        set_scheduler(scheduler)
+        wakes: list[str] = []
+        scheduler.set_driver_wakeup(lambda: wakes.append("host"))
+        try:
+            with scheduler.running():
+                scheduler.spawn(lambda: None)
+                assert wakes == ["host"]
+        finally:
+            set_scheduler(None)
+            scheduler.close()
+
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

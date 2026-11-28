@@ -3864,11 +3864,11 @@ class TestSchedulerExamples:
         with s.running():
             s.call_on_scheduler(seen.append, "inline")
             assert seen == ["inline"]
-            assert wakes == []
+            assert wakes == ["host"]
             s.spawn(lambda: None)
-            assert wakes == ["host"]
+            assert wakes == ["host", "host"]
             s.turn()
-            assert wakes == ["host"]
+            assert wakes == ["host", "host"]
 
     def test_turn_on_another_thread_between_slices_is_rejected(self):
         s = _new_scheduler()
@@ -4037,6 +4037,57 @@ class TestSchedulerExamples:
         s.run()
         assert seen == ["callback", 0]
 
+    def test_call_soon_threadsafe_on_live_turn_breaks_without_waking_the_host(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.breaks = 0
+
+            def _break_wait(self) -> None:
+                self.breaks += 1
+                super()._break_wait()
+
+        s = Probe()
+        set_scheduler(s)
+        seen: list[object] = []
+        wakes: list[str] = []
+        s.set_driver_wakeup(lambda: wakes.append("host"))
+
+        def worker() -> None:
+            # spawn before run() already posted the host. count only this call.
+            wakes.clear()
+            before = s.breaks
+            s.call_soon_threadsafe(seen.append, "queued")
+            seen.append(s.breaks - before)
+
+        s.spawn(worker)
+        s.run()
+        assert seen == [1, "queued"]
+        assert wakes == []
+
+    def test_owner_calls_between_slices_break_wait_and_wake_the_host(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.breaks = 0
+
+            def _break_wait(self) -> None:
+                self.breaks += 1
+                super()._break_wait()
+
+        s = Probe()
+        set_scheduler(s)
+        wakes: list[str] = []
+        s.set_driver_wakeup(lambda: wakes.append("host"))
+        with s.running():
+            assert s.in_turn() is False
+            before = s.breaks
+            s.call_soon_threadsafe(lambda: None)
+            s.call_on_scheduler(lambda: None)
+            assert s.breaks - before == 2
+            assert wakes == ["host", "host"]
+            assert s._wakeup.is_set()
+
     def test_owner_task_spawn_timer_and_stop_do_not_break_wait(self):
         class Probe(BasicScheduler):
             def __init__(self) -> None:
@@ -4086,7 +4137,7 @@ class TestSchedulerExamples:
         set_scheduler(s)
 
         def callback() -> None:
-            s.saw_flag = s._in_driver_wait
+            s.saw_flag = s._in_internal_wait
 
         def arm() -> None:
             s.hook = lambda: s.call_on_scheduler(callback)
@@ -4097,6 +4148,42 @@ class TestSchedulerExamples:
         assert time.monotonic() - started < 1.0
         assert s.saw_flag is True
         assert s.woke is True
+
+    def test_call_soon_threadsafe_breaks_blocked_driver_on_owner_thread(self):
+        class Probe(BasicScheduler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.hook: object = None
+                self.woke = False
+
+            def _wait_thread(self) -> None:
+                hook = self.hook
+                self.hook = None
+                if hook is not None:
+                    hook()
+                    self.woke = self._wakeup.is_set()
+                    if not self.woke:
+                        self._wakeup.set()
+                        self.stop()
+                super()._wait_thread()
+
+        s = Probe()
+        set_scheduler(s)
+        seen: list[str] = []
+
+        def callback() -> None:
+            seen.append("callback")
+            s.stop()
+
+        def arm() -> None:
+            s.hook = lambda: s.call_soon_threadsafe(callback)
+
+        s.spawn(arm)
+        started = time.monotonic()
+        s.run_forever()
+        assert time.monotonic() - started < 1.0
+        assert s.woke is True
+        assert seen == ["callback"]
 
     def test_pulse_inside_owner_callback_resumes_when_wait_returns(self):
         class Probe(BasicScheduler):
@@ -4151,7 +4238,7 @@ class TestSchedulerExamples:
                 hook = self.hook
                 self.hook = None
                 if hook is not None:
-                    assert self._in_driver_wait
+                    assert self._in_internal_wait
                     hook()
                     self.callback_during_wait = self.order == ["park", "callback"]
                 await super()._driver_wait()

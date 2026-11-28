@@ -483,15 +483,17 @@ class BaseDrivingMixin:
             self._poll_io()
             await self._driver_yield()
             return
-        # blocked-driver signal. only this wait. the owner thread uses it
-        # to break the wait from call_on_scheduler, stop, timer enqueue,
-        # and _make_runnable. not the batch runner, not callback drain,
+        # this loop's own wait, inside the slice. the owner breaks it from
+        # call_soon_threadsafe, call_on_scheduler, stop, timer enqueue, and
+        # _make_runnable. a host parked between slices is the other wake:
+        # _in_turn is clear there. not the batch runner, not callback drain,
         # and not the ring's owner break_wait policy.
-        self._in_driver_wait = True
+        assert self._in_turn
+        self._in_internal_wait = True
         try:
             await self._driver_wait()
         finally:
-            self._in_driver_wait = False
+            self._in_internal_wait = False
 
     def _before_arun(self) -> None:
         pass
@@ -1416,31 +1418,6 @@ class _RunnableLink(_tasks.TaskLink):
         self._scheduler._runnable.on_modified(task)
 
 
-# set while a proactor worker polls under its lock. host wakeups queue here
-# and run after the lock is released.
-_host_wakeup_defer = threading.local()
-
-
-@contextmanager
-def _defer_host_wakeups(pending: list[tuple[BaseScheduler, Callable[[], object]]]):
-    """Queue host wakeups on this thread until the block exits."""
-
-    previous = getattr(_host_wakeup_defer, "pending", None)
-    _host_wakeup_defer.pending = pending
-    try:
-        yield
-    finally:
-        _host_wakeup_defer.pending = previous
-
-
-def _deliver_deferred_host_wakeups(
-    pending: list[tuple[BaseScheduler, Callable[[], object]]],
-) -> None:
-    for scheduler, callback in pending:
-        scheduler._invoke_host_wakeup(callback)
-    pending.clear()
-
-
 class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
     """Shared cooperative scheduling mechanics for concrete drivers."""
 
@@ -1480,8 +1457,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         self._exception_handler: Callable[[dict[str, Any]], object] | None = None
         self._in_callback_drain = False
         self._callback_drain_task: tealet.tealet | None = None
-        # true only while _idle_or_poll is inside _driver_wait
-        self._in_driver_wait = False
+        # true only while _idle_or_poll is inside _driver_wait.
+        # that wait runs inside a slice, so this implies _in_turn.
+        self._in_internal_wait = False
         # host loop (Qt, asyncio) parked outside run(); None while run() owns the wait
         self._host_wakeup: Callable[[], None] | None = None
 
@@ -1894,9 +1872,10 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         Not cancellable: once queued, the callback runs (or the scheduler
         stops). Same-thread only, and only while a scheduler turn is live
         (a task or callback drain). The driver is not waiting, so this does
-        not ``break_wait``. Use ``call_soon_threadsafe`` from another thread
-        or from asyncio while ``arun`` is parked. Use ``call_on_scheduler``
-        for a worker completion that has no context to keep.
+        not ``break_wait``. Use ``call_soon_threadsafe`` from another thread,
+        a signal handler, or asyncio while ``arun`` is parked. Use
+        ``call_on_scheduler`` for a worker completion that has no context
+        to keep.
         """
 
         if context is None:
@@ -1909,17 +1888,20 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         *args: object,
         context: contextvars.Context | None = None,
     ) -> None:
-        """Schedule `callback(*args)` from another thread or a parked driver.
+        """Queue `callback(*args)` for a later drain and always break the wait.
 
-        Copies context, queues, and wakes the driver. The callback runs on a
-        later drain, not on this stack. Use ``call_on_scheduler`` when the
-        caller has no tealet context to keep.
+        Copies context. The callback does not run on this stack. The backend
+        break runs on every thread, including the owner during a slice, so a
+        queued callback is not slept through. ``set_driver_wakeup`` stays
+        quiet while that owner is inside a slice. Use ``call_on_scheduler``
+        when the caller has no tealet context to keep and the owner should
+        run the callback inline.
         """
 
         if context is None:
             context = contextvars.copy_context()
         self._ready_callbacks.append((callback, args, context))
-        self._wake_driver()
+        self._wake_unless_owner_driving(always_break=True)
 
     def call_on_scheduler(
         self,
@@ -1930,21 +1912,20 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
 
         The owner thread is the thread inside ``running()``, ``run()``, or
         ``arun()``, including the gaps between ``turn`` slices. That thread
-        runs the callback on this stack. Any other thread queues it and
-        wakes the driver. When the owner runs it while the driver is blocked
-        in ``_driver_wait``, ``_break_wait`` runs afterwards so a
-        ``PulseEvent.set`` inside the callback is serviced as soon as that
-        wait returns. The callback may queue runnable work. It must not
-        switch tealets from an asyncio stack or from inside that wait.
+        runs the callback on this stack. Any other thread queues it. Another
+        thread always wakes. The owner wakes outside a slice or while this
+        loop is inside its own wait. During the rest of a slice the owner
+        reads the queue before it parks. ``call_soon_threadsafe`` always
+        breaks, including during that slice. The callback may queue runnable
+        work. It must not switch tealets from an asyncio stack or from
+        inside that wait.
         """
 
         if threading.get_ident() == self._owner_thread:
             self._run_callback(callback, args, None)
-            if self._in_driver_wait:
-                self._break_wait()
-            return
-        self._ready_callbacks.append((callback, args, None))
-        self._wake_driver()
+        else:
+            self._ready_callbacks.append((callback, args, None))
+        self._wake_unless_owner_driving()
 
     def call_later(
         self,
@@ -2453,68 +2434,41 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
                 return self.time()
             return self._next_timer_deadline()
 
-    def _wake_unless_owner_driving(self) -> None:
-        # during a slice the owner thread reads the queues before it parks,
-        # except while it is blocked in _driver_wait. between slices the
-        # host is outside turn(), so that same thread wakes and posts
-        # set_driver_wakeup. any other thread always wakes. before running()
-        # the owner is unset, so those callers wake too.
-        if self._in_turn and threading.get_ident() == self._owner_thread and not self._in_driver_wait:
+    def _wake_unless_owner_driving(self, *, always_break: bool = False) -> None:
+        # call_on_scheduler, stop, timers, and _make_runnable. the owner
+        # inside a slice reads the queues before it parks, so that case
+        # returns. call_soon_threadsafe passes always_break: the backend
+        # break sticks even then, so a signal handler on this thread cannot
+        # queue work the next park sleeps through. the host callback stays
+        # quiet during the slice either way. inside this loop's own wait
+        # the break runs and the host is already on the stack. outside a
+        # slice the break sticks and set_driver_wakeup runs. any other
+        # thread always wakes. before running() the owner is unset.
+        owner_in_turn = self._in_turn and threading.get_ident() == self._owner_thread
+        if owner_in_turn and not self._in_internal_wait and not always_break:
             return
-        self._wake_driver()
-
-    def _wake_driver(self) -> None:
-        """Wake the backend wait, then the host callback if one is installed.
-
-        A wake on the owner thread during a slice is not passed to the host.
-        That thread learns what to do from ``turn``'s deadline or from the
-        next ``run`` iteration. Parking the driver at the start of a batch
-        is such a wake; reporting it would schedule another slice forever.
-        Between slices, and from any other thread, the host is notified.
-        """
-
         self._break_wait()
-        callback = self._host_wakeup
-        if callback is None:
-            return
-        # the slice's own thread learns the next step from turn()'s deadline
-        # or from the next run() iteration. between slices _in_turn is clear,
-        # so the host thread still posts set_driver_wakeup.
-        if self._in_turn and threading.get_ident() == self._owner_thread:
-            return
-        deferred = getattr(_host_wakeup_defer, "pending", None)
-        if deferred is not None:
-            deferred.append((self, callback))
-            return
-        self._invoke_host_wakeup(callback)
-
-    def _invoke_host_wakeup(self, callback: Callable[[], object]) -> None:
-        """Run the host wakeup. Failures stay off the reaper thread."""
-
-        try:
-            callback()
-        except Exception as exc:
-            self.call_exception_handler(
-                {
-                    "message": "Exception in driver wakeup callback",
-                    "exception": exc,
-                }
-            )
+        # If the current thread is not the owner driving, invoke the host wakeup callback.
+        if not owner_in_turn:
+            callback = self._host_wakeup
+            if callback is not None:
+                try:
+                    callback()
+                except Exception as exc:
+                    self.call_exception_handler(
+                        {
+                            "message": "Exception in driver wakeup callback",
+                            "exception": exc,
+                        }
+                    )
 
     @abstractmethod
     def _break_wait(self) -> None:
-        """Wake a parked backend wait. Safe from any thread.
+        """Unblock the driver's parked wait. A break before the park stays visible.
 
-        Callers use ``_wake_driver``, which also runs the host wakeup from
-        ``set_driver_wakeup``. ``call_on_scheduler`` calls this directly when
-        the owner thread runs a callback during ``_in_driver_wait``.
-        ``call_soon`` never wakes. ``stop``, ``_make_runnable``, and timer
-        enqueue call ``_wake_driver`` from another thread, from the owner
-        thread between ``turn`` slices, and from the owner thread while
-        ``_in_driver_wait`` is set. During a slice the owner thread reads
-        its queues before the next park. ``_owner_thread`` is ``None``
-        outside ``running()`` / ``run`` / ``arun``, so those callers wake
-        too and a host receives ``set_driver_wakeup``.
+        ``BasicScheduler`` sets the ``threading.Event`` that ``_wait_thread``
+        waits on. ``ProactorScheduler`` calls ``Proactor.wake_wait`` and has
+        no event of its own. Who may call this is ``_wake_unless_owner_driving``.
         """
 
 
@@ -2536,6 +2490,11 @@ class BasicScheduler(SyncDrivingMixin, BaseScheduler, SyncSchedulerDrivingAPI):
     # -- Driver wakeup -------------------------------------------------
 
     def _break_wait(self) -> None:
+        """Set the event ``_wait_thread`` waits on.
+
+        The set stays until that wait, or until ``_poll_io`` consumes it.
+        """
+
         self._wakeup.set()
 
     def _poll_io(self) -> None:

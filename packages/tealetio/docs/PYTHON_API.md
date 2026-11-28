@@ -980,17 +980,20 @@ drain no-ops.
 
 `call_soon` queues for the next drain and copies context. It does not wake a
 parked driver. `call_soon_threadsafe` is that queue from any thread: it copies
-context and always wakes, and the callback still runs on a later drain.
+context, the callback still runs on a later drain, and it always breaks the
+backend wait, including on the owner thread during a slice. The break sticks
+until the next park. `set_driver_wakeup` stays quiet during that slice.
 `call_on_scheduler` is the worker-thread hop. It does not copy context. The
 owner thread runs the callback on the current stack, including while hosted
 `arun` is parked in asyncio and while a same-thread completion runs inside
-the driver wait. Any other thread queues the callback and wakes the driver.
-When the owner runs the callback while the driver is blocked in that wait,
-the wait is broken, so a `PulseEvent.set` in the callback is serviced when
-the wait returns. A completion callback that needs a tealet uses
-`call_on_scheduler`, not `call_soon_threadsafe`. The callback may queue
-runnable work. It must not switch tealets from an asyncio stack or from
-inside the driver wait.
+this loop's wait. Any other thread queues the callback. Another thread always
+breaks the wait. The owner breaks it only outside a slice, where a host may
+be about to park, and while this loop is inside its own wait. During the rest
+of a slice the owner reads the queue before it parks. A `PulseEvent.set`
+on the owner during that wait is serviced when the wait returns. A completion
+callback that needs a tealet uses `call_on_scheduler`, not
+`call_soon_threadsafe`. The callback may queue runnable work. It must not
+switch tealets from an asyncio stack or from inside that wait.
 
 Callbacks are for **simple work**. They must not block waiting for another
 event, future, or remaining timer/threadsafe callback: the drain tealet is
