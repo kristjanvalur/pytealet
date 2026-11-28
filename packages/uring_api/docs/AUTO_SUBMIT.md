@@ -34,7 +34,7 @@ With `auto_submit` on, the same SQE is published:
 
 - before `wait()` or `serve_completions` reaps, when the queue holds a
   waitable SQE (under `SQPOLL`, whenever the tail is unpublished);
-- after a `wait()` burst that prepared one;
+- after a `wait()` burst in which this thread prepared one;
 - when a `serve_completions` callback returns, under the waiter rule, or
   at end of turn under `SQPOLL`.
 

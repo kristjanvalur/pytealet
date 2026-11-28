@@ -1460,118 +1460,6 @@ def _unpublished(ring: uring_api.Ring) -> int:
     return stats["sqe"] - submitted
 
 
-def test_break_wait_callback_runs_from_another_thread_when_available():
-    require_uring()
-
-    calls: list[int] = []
-
-    with uring_api.Ring() as ring:
-        ring.break_wait_callback = lambda: calls.append(1)
-        break_wait_from_other_thread(ring)
-        assert calls == [1]
-        assert ring.wait_idle(0) is True
-
-
-def test_owner_break_wait_skips_callback_by_default_when_available():
-    require_uring()
-
-    calls: list[int] = []
-
-    with uring_api.Ring() as ring:
-        ring.break_wait_callback = lambda: calls.append(1)
-        ring.break_wait()
-        assert calls == []
-        assert ring.wait_idle(0) is False
-
-
-def test_owner_break_wait_runs_callback_when_skip_disabled():
-    require_uring()
-
-    calls: list[int] = []
-
-    with uring_api.Ring(skip_owner_break_wait=False) as ring:
-        ring.break_wait_callback = lambda: calls.append(1)
-        ring.break_wait()
-        assert calls == [1]
-        assert ring.wait_idle(0) is True
-
-
-def test_break_wait_callback_reentry_does_not_recurse_when_available():
-    require_uring()
-
-    calls: list[int] = []
-
-    with uring_api.Ring() as ring:
-
-        def callback() -> None:
-            calls.append(1)
-            ring.break_wait()
-
-        ring.break_wait_callback = callback
-        break_wait_from_other_thread(ring)
-        assert calls == [1]
-        assert ring.wait_idle(0) is True
-
-
-def test_break_wait_callback_error_still_opens_the_park_when_available():
-    require_uring()
-
-    errors: list[str] = []
-
-    def callback() -> None:
-        raise RuntimeError("boom")
-
-    def run(ring: uring_api.Ring) -> None:
-        try:
-            ring.break_wait()
-        except RuntimeError as exc:
-            errors.append(str(exc))
-
-    with uring_api.Ring() as ring:
-        ring.break_wait_callback = callback
-        thread = threading.Thread(target=run, args=(ring,))
-        thread.start()
-        thread.join(1.0)
-        assert thread.is_alive() is False
-        assert errors == ["boom"]
-        assert ring.wait_idle(0) is True
-
-
-def test_break_wait_callback_property_validation_when_available():
-    require_uring()
-
-    def callback() -> None:
-        return None
-
-    with uring_api.Ring() as ring:
-        assert ring.break_wait_callback is None
-        ring.break_wait_callback = callback
-        assert ring.break_wait_callback is callback
-        ring.break_wait_callback = None
-        assert ring.break_wait_callback is None
-        with pytest.raises(TypeError, match="break_wait_callback must be callable or None"):
-            ring.break_wait_callback = object()  # type: ignore[assignment]
-        with pytest.raises(TypeError, match="cannot delete break_wait_callback"):
-            del ring.break_wait_callback
-
-
-def test_stop_serving_runs_break_wait_callback_when_available():
-    require_uring()
-
-    calls: list[int] = []
-
-    with uring_api.Ring() as ring:
-        ring.callback = lambda _completion: None
-        ring.break_wait_callback = lambda: calls.append(1)
-        thread = threading.Thread(target=ring.serve_completions)
-        thread.start()
-        wait_until_running(ring)
-        ring.stop_serving()
-        thread.join(1.0)
-        assert thread.is_alive() is False
-        assert calls == [1]
-
-
 def test_single_issuer_worker_enter_fails_and_leaves_the_host_parked():
     """The callback fills a free slot. The publish enter is EEXIST and does not wake the host."""
 
@@ -1725,7 +1613,7 @@ def test_single_issuer_full_queue_prepare_stops_the_worker_when_available():
 
 
 def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
-    """The delivery callback runs. The publish enter fails and does not call break_wait_callback."""
+    """The delivery callback runs. The publish enter fails and leaves wait_idle closed."""
 
     require_setup_flags(uring_api.IORING_SETUP_SINGLE_ISSUER)
 
@@ -1736,7 +1624,6 @@ def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
         left.setblocking(False)
         right.setblocking(False)
         prepared = threading.Event()
-        wakes: list[int] = []
         errors: list[BaseException] = []
 
         def callback(completion: uring_api.Completion) -> None:
@@ -1745,9 +1632,6 @@ def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
             assert ring is not None
             ring.prepare_recv(left.fileno(), bytearray(4), 0, 2)
             prepared.set()
-
-        def wake() -> None:
-            wakes.append(1)
 
         def run_worker() -> None:
             assert ring is not None
@@ -1758,7 +1642,6 @@ def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
 
         ring = uring_api.Ring(flags=uring_api.IORING_SETUP_SINGLE_ISSUER)
         ring.callback = callback
-        ring.break_wait_callback = wake
         worker = threading.Thread(target=run_worker)
         worker.start()
         wait_until_running(ring)
@@ -1771,7 +1654,6 @@ def test_single_issuer_worker_runs_callback_when_the_host_is_awake():
         assert len(errors) == 1
         assert isinstance(errors[0], OSError)
         assert errors[0].errno == errno.EEXIST
-        assert wakes == []
         assert ring.wait_idle(0) is False
         assert _unpublished(ring) >= 1
     finally:

@@ -611,8 +611,8 @@ See `docs/SEND_ALL.md`.
 **Current caveat:** `SINGLE_ISSUER` without `SQPOLL` plus completion
 workers. A worker may fill a free slot. The publish is `OSError`
 (`EEXIST`) and that worker stops. That stop is fatal for the ring.
-The library does not drain parked work on the way out. There is no
-host wake that publishes the SQE for it. Prefer `flags=0`, or
+The library does not drain parked work on the way out. The filled SQE
+stays unpublished. Prefer `flags=0`, or
 `SQPOLL`, when workers must enter. See `docs/AUTO_SUBMIT.md`.
 `ring.fd` is not a substitute: an unsubmitted SQE does not make the CQ
 readable. `DEFER_TASKRUN` still will not mark the fd readable until the

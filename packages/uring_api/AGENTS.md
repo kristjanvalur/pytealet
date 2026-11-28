@@ -279,9 +279,8 @@ pointer), not a second stored `user_data`.
   be inside that span. `driver_blocks` stays set. Before it is set the
   sleep flag is ignored, so a host that only polls still gets the enter
   for a waitable SQE. A non-waitable-only batch does not enter even then.
-  That is the non-SQPOLL rule. There is no host wake for a worker that
-  filled an SQE. A forbidden enter is `OSError` (`EEXIST`) on that worker.
-  `break_wait_callback` runs only from `break_wait` and `stop_serving`.
+  That is the non-SQPOLL rule. A forbidden enter is `OSError` (`EEXIST`)
+  on that worker.
   SQPOLL publishes any SQE the handler kept,
   including that batch, when the handler returns.
   One per-thread count, snapshotted at handler entry
@@ -300,8 +299,8 @@ pointer), not a second stored `user_data`.
   the same count around each burst and submits after the burst when it
   moved. The flush before the first reap stays: a plain ring uses
   `sq_waitable`, and `SQPOLL` publishes an unpublished tail, including a
-  nowait-only queue. A silent repark does not submit again. There is no
-  flush on the way out of `wait()`. `prepare()` stays lazy, so
+  nowait-only queue. A silent repark does not submit again before the
+  next reap, and `wait()` does not flush on the way out. `prepare()` stays lazy, so
   several operations from one callback share that enter. On a free-threaded build the
   callback overlaps the waiter; on the GIL the same hole opens if the callback
   drops the GIL before `prepare`. A callback that returns before any waiter is
@@ -356,8 +355,9 @@ pointer), not a second stored `user_data`.
   direct nowait close, shutdown, poll_remove, or a silenced multishot
   cancel, without the unique-waiter or `driver_blocks` gates. Single-thread
   `wait()` publishes before the first reap, and again after a burst when
-  `ring_thread_publish_sqes` moved. It does not publish again before a
-  silent repark, and it does not flush on the way out. Under `SQPOLL` the
+  `ring_thread_publish_sqes` moved. A silent repark does not submit
+  again before the next reap, and `wait()` does not flush on the way
+  out. Under `SQPOLL` the
   entry flush still publishes an unpublished tail, including a nowait-only
   queue, before the thread blocks. liburing copies the tail
   when its userspace head is behind and skips the enter when that copy
@@ -539,10 +539,7 @@ get_sqe_try/re-validate protocol across prepare).
   the creating thread is a no-op, so the driver does not latch an empty park.
   `Ring(skip_owner_break_wait=False)` keeps the sticky wake for a waiter on
   another thread (inline `wait_async`). The latch must stick before that
-  thread parks. There is no setter and no `URING_API_SKIP_OWNER_BREAK_WAIT`.
-  A call that opened the park then runs `break_wait_callback` when set.
-  The owner skip does not. A nested call from the callable still opens
-  the park and does not run the callable again.
+  thread parks. There is no setter.
 - While `serve_completions()` workers are running, public `wait()` raises
   `RuntimeError`. Join worker threads and call `stop_serving()` before `close()`.
 - Delivery callback exceptions invoke `exception_handler` when set; handler
@@ -584,7 +581,7 @@ get_sqe_try/re-validate protocol across prepare).
   it also stays queued when no waiter is held.
   ``SINGLE_ISSUER`` without ``SQPOLL``: a worker may fill a free SQE.
   The following publish is ``OSError`` (``EEXIST``) and that worker stops.
-  There is no host wake. A full SQ with ``make_room`` on is the same error
+  The filled SQE stays unpublished. A full SQ with ``make_room`` on is the same error
   and does not park. A next leg that cannot take a slot fails the
   send-all. The issuer still flushes before it parks. An unbounded idle
   park can stall a direct nowait that is not parked. Inline ``wait()``

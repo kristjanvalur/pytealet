@@ -253,7 +253,6 @@ int UringApiRing_traverse(UringApiRing *self, visitproc visit, void *arg) {
     Py_VISIT(self->delivery_callback);
     Py_VISIT(self->delivery_exception_handler);
     Py_VISIT(self->nowait_error_handler);
-    Py_VISIT(self->break_wait_callback);
     return fd_table_traverse(self, visit, arg);
 }
 
@@ -261,7 +260,6 @@ int UringApiRing_clear(UringApiRing *self) {
     Py_CLEAR(self->delivery_callback);
     Py_CLEAR(self->delivery_exception_handler);
     Py_CLEAR(self->nowait_error_handler);
-    Py_CLEAR(self->break_wait_callback);
     clear_parked(self);
     return 0;
 }
@@ -512,44 +510,6 @@ int UringApiRing_set_nowait_error_handler(UringApiRing *self, PyObject *value, v
     Py_END_CRITICAL_SECTION();
     Py_XDECREF(handler);
     Py_XDECREF(old_handler);
-    return 0;
-}
-
-static PyObject *UringApiRing_get_break_wait_callback(UringApiRing *self, void *closure) {
-    PyObject *callback;
-
-    (void)closure;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    callback = Py_XNewRef(self->break_wait_callback);
-    Py_END_CRITICAL_SECTION();
-    if (!callback) {
-        Py_RETURN_NONE;
-    }
-    return callback;
-}
-
-static int UringApiRing_set_break_wait_callback(UringApiRing *self, PyObject *value, void *closure) {
-    PyObject *callback;
-    PyObject *old_callback = NULL;
-
-    (void)closure;
-    if (!value) {
-        PyErr_SetString(PyExc_TypeError, "cannot delete break_wait_callback");
-        return -1;
-    }
-    if (value != Py_None && !PyCallable_Check(value)) {
-        PyErr_SetString(PyExc_TypeError, "break_wait_callback must be callable or None");
-        return -1;
-    }
-
-    callback = value == Py_None ? NULL : Py_NewRef(value);
-    Py_BEGIN_CRITICAL_SECTION(self);
-    old_callback = self->break_wait_callback;
-    self->break_wait_callback = callback;
-    callback = NULL;
-    Py_END_CRITICAL_SECTION();
-    Py_XDECREF(callback);
-    Py_XDECREF(old_callback);
     return 0;
 }
 
@@ -1028,15 +988,18 @@ static PyMethodDef UringApiRing_methods[] = {
      "unique-waiter slot as wait(). A peek that does not enter does not fail a setup "
      "flag. An enter the kernel rejects is OSError."},
     {"wait", _PyCFunction_CAST(UringApiRing_wait), URING_API_METH_KEYWORDS,
-     "If auto_submit is on and the SQ holds a waitable SQE, flush prepared SQEs, "
-     "then wait for ready completions with the given "
-     "timeout. Nowait SQEs (cancel, close, shutdown, poll_remove) do not by themselves "
-     "cause that flush; they stay queued until a waitable flush, submit(), or a full SQ. "
+     "If auto_submit is on, flush prepared SQEs, then wait for ready completions "
+     "with the given timeout. A plain ring flushes before the first reap only "
+     "when the queue holds a waitable SQE. A direct nowait stays queued until "
+     "submit(), a full SQ, or a later waitable flush. SQPOLL publishes an "
+     "unpublished tail before that reap, including a nowait-only queue. "
      "With no callback, returns a list (possibly empty on timeout/break_wait). With a "
      "delivery callback, invokes it once per user-visible CQE and returns None; empty "
-     "drains skip the callback. A blocking or timed wait that reaps only "
-     "silent CQEs (nothing delivered, and not a break_wait) submits any newly "
-     "prepared waitable SQEs and parks again. "
+     "drains skip the callback. After the burst, submit when this thread's "
+     "publish count moved: a waitable SQE on a plain ring, and also a direct "
+     "nowait under SQPOLL. A burst that prepared nothing does not enter. A "
+     "blocking or timed wait that delivered nothing, and was not a break_wait, "
+     "parks again after that flush. "
      "With auto_submit off that repark still happens when the burst filled "
      "housekeeping (a send-all next leg, or a parked copy). A caller prepare "
      "stays unpublished unless make_room or that housekeeping publish copies "
@@ -1094,13 +1057,6 @@ static PyGetSetDef UringApiRing_getset[] = {
      "failures. Context keys: message, ring, res, flags, kind (COMPLETION_KIND_*), fd (advisory int or "
      "None). Invoked after CQ drain (not under the drain lock). Must not re-enter ring wait/serve. If "
      "the hook raises, exception_handler is invoked.",
-     NULL},
-    {"break_wait_callback", (getter)UringApiRing_get_break_wait_callback, (setter)UringApiRing_set_break_wait_callback,
-     "Optional callable with no arguments. break_wait() runs it after opening the idle park, "
-     "except an owner-thread call that skip_owner_break_wait drops. stop_serving uses that "
-     "same path. None disables it. The callable must not call break_wait(); a nested "
-     "call still opens the park and does not run the callable again. A host already inside "
-     "wait_idle does not need it. A raise fails break_wait(), or stops that service thread.",
      NULL},
     {NULL, NULL, NULL, NULL, NULL}};
 

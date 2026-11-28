@@ -217,29 +217,31 @@ That path does not enter.
 
 **Lazy submit:** `prepare_*` / nowait helpers (including cancel and poll_remove)
 only fill SQEs. Work becomes kernel-visible when you call `ring.submit()`,
-when **`auto_submit` is on (the default) and `wait()` flushes a queue that is
-already waitable**, when `make_room` is on and
-prepare hits a full SQ, or
-when handling a burst prepared a waitable SQE on this thread. A cancel sets `sq_waitable`, so the next
+when **`auto_submit` is on (the default) and `wait()` flushes** (a plain ring
+when the queue is already waitable; `SQPOLL` for any unpublished tail), when
+`make_room` is on and prepare hits a full SQ, or when handling a burst moved
+this thread's publish count. A cancel sets `sq_waitable`, so the next
 `wait()` submits it, unless that cancel is nowait **and** its target is a
 `recv_multishot` with `no_deliver_multi` set: neither the cancel ack nor the
 target CQE is delivered, so there is nothing to wake for. A direct close,
 shutdown, or poll_remove does not set the bit. The same op copied out of a
 park (behind `send_all`) does: the wait that releases that tail
-submits it. A queue of only direct non-waitable SQEs is not flushed
-by `wait()` or by the harvest inside `serve_completions()`. Call `submit()`,
+submits it. On a plain ring, a queue of only direct non-waitable SQEs is not
+flushed by `wait()` or by the harvest inside `serve_completions()`. Call `submit()`,
 or prepare a waitable SQE and let the next flush take both: the queue is
 ordered, so a non-waitable SQE already ahead of that waitable one rides the
-same enter. The unique CQ waiter uses that harvest rule before it parks in
-`io_uring_wait_cqe`. After it has delivered a completion callback, the service
-thread submits once when that handling filled a waitable SQE and the waiter is
-already held, including while the waiter is blocked in the kernel. That covers
-the next send, the first leg of a send-all, a cancel that marks the queue
-waitable, and a close, shutdown, or poll_remove filled from a park. A direct
-close, shutdown, poll_remove, or other non-waitable stays queued for
-`submit()`, a full submission queue, or a later flush that also carries a
-waitable SQE. When the handling did fill a waitable SQE, the whole ordered
-queue is entered, so a non-waitable already in it rides along. The host parked
+same enter. `SQPOLL` publishes an unpublished tail before that reap,
+including a nowait-only queue. The unique CQ waiter uses that same before-reap
+rule before it parks in `io_uring_wait_cqe`. On a plain ring, after a
+completion callback the service thread submits once when that handling filled
+a waitable SQE and the unique waiter is already held, including while the
+waiter is blocked in the kernel. That covers the next send, the first leg of
+a send-all, a cancel that marks the queue waitable, and a close, shutdown, or
+poll_remove filled from a park. A direct close, shutdown, poll_remove, or
+other non-waitable stays queued for `submit()`, a full submission queue, or a
+later flush that also carries a waitable SQE. When the handling did fill a
+waitable SQE, the whole ordered queue is entered, so a non-waitable already
+in it rides along. The host parked
 in `wait_idle` does not submit again until something completes, so a waitable
 batch has to be entered before the callback's thread goes back to waiting.
 `prepare()` only fills, so several operations from one callback share the
@@ -249,7 +251,9 @@ fill afterwards. A link-timeout SQE does not count on its own. A callback that
 prepared no waitable SQE does not enter, and leaves another thread's queue for
 the harvest flush or for `submit()`. If the callback returns before any waiter
 is held, the SQEs stay queued for host `submit()` or for a later flush that
-finds the queue waitable.
+finds the queue waitable. Under `SQPOLL` the handler publishes when it
+returns if this thread kept any SQE, including a direct nowait. That publish
+does not check the unique waiter or whether the host is parked.
 `auto_submit=False`
 means `wait()` and a completion handler do not publish a caller `prepare()`
 on their own. `make_room`
@@ -276,7 +280,9 @@ and not a `break_wait`) then parks again, without another submit. A timed
 wait keeps the original deadline and parks with the time still left. `wait(0)`
 runs that flush and returns; it does not park again. There is no further
 flush on the way out, in callback mode or in pull mode. An SQE another thread
-queued during the burst waits until the next `wait()` or `submit()`.
+queued during the burst does not by itself cause that flush. When this
+thread's count did move, it is submitted with the tail. It stays queued
+only when the burst did not move the count.
 `break_wait` still returns: a wake NOP, or a sticky latch taken before the
 reaper entered the kernel, is not retried.
 
@@ -536,9 +542,6 @@ Successful `prepare_statx()` completions always leave `completion.result` as
 internal buffer lacks size fields, `completion.result` is `None` and the
 completion is still delivered.
 
-**Behaviour change (since PR #34):** successful `prepare_statx()` no longer sets
-`completion.result` to `0`; it stays `None`.
-
 Provided-buffer receive uses a caller-owned ring created with
 `create_buf_group()`. Submit one-shot receives with `prepare_recv_buf()` or
 stream receives with `prepare_recv_multishot(fd, buf_group, ...)`. Both paths
@@ -728,10 +731,11 @@ environment rejects the poller (privileges, container policy). There is no
 dedicated capability key — `probe(flags=IORING_SETUP_SQPOLL)` checks it.
 `probe()` and `is_available()` still use a plain ring. With the poller,
 userspace still publishes at the same points: `wait()` before it blocks
-(including a nowait-only queue), again after a burst, and again before a
-silent repark; a full submission queue; `submit()`; and a completion
-handler when it returns. The handler publish also covers a direct nowait
-close. Each of those calls is `io_uring_submit`. liburing copies the tail
+(including a nowait-only queue), and again after a burst when this
+thread's publish count moved; a full submission queue; `submit()`; and a
+completion handler when it returns. That count includes a direct nowait,
+so the post-burst publish covers one too. The handler publish also covers
+a direct nowait close. Each of those calls is `io_uring_submit`. liburing copies the tail
 when its userspace head is behind, and it does not enter when that copy
 published nothing. `submit()` and `submit_*_sqes` count the SQEs that copy
 handed over. They do not count SQEs the poller has not issued yet. A free
@@ -903,12 +907,7 @@ would drop the early wake. Assigning `ring.skip_owner_break_wait` raises
 `AttributeError`. `stop_serving()` still posts its NOP from the creating
 thread.
 
-`break_wait_callback` is for a host that does not park in `wait_idle`.
-`break_wait()` runs it after opening the idle park, including
-`stop_serving()`. A call that `skip_owner_break_wait` drops does not run
-it. A nested `break_wait()` from the callable still opens the park and
-does not run the callable again. It does not run because a worker filled
-an SQE. A worker publish the kernel rejects is `OSError` on that worker.
+A worker publish the kernel rejects is `OSError` on that worker.
 A direct nowait that is not parked is still left for a later `submit()`.
 
 `wait_idle` is a **multi-signaller, single-waiter** park: many threads may call
@@ -1007,19 +1006,13 @@ The capsule currently exposes:
 - `abi_version`, `struct_size`, and `feature_flags` for compatibility checks.
   While the package remains pre-release, `abi_version` stays at **1** but the
   function table may be reordered or extended; clients should compare
-  `struct_size` and null-check pointers they rely on. **Break vs earlier v1
-  drafts:** `ring_set_pre_submit` / `ring_set_c_pre_submit` were removed;
-  all `ring_submit_*` / `ring_submit_*_nowait` op slots were dropped — C
-  clients construct then `ring_prepare()`; `ring_construct_*_multishot` does
-  not take `base_sequence` (set `completion.sequence` after construct). Python
+  `struct_size` and null-check pointers they rely on. C clients construct,
+  then `ring_prepare()`. `ring_construct_*_multishot` does not take
+  `base_sequence`; set `completion.sequence` after construct. Python
   construct/prepare accept optional `base_sequence` after `user_data`.
-  C completion callbacks receive one `Completion` per call (not a list).
-  Appended: `completion_set_sequence`, `ring_wait_idle`,
-  `completion_take_user_data`, `ring_poll`, `ring_stats`,
-  `completion_arm_link_timeout`. `completion_clear_user_data` was removed
-  (`take` covers it). Python `Ring.prepare_*` is construct+prepare sugar
-  with cargo then `user_data`. Rebuild any out-of-tree C client that cached
-  `offsetof` values;
+  A C completion callback receives one `Completion` per call. Python
+  `Ring.prepare_*` is construct+prepare sugar with cargo then `user_data`.
+  Rebuild any out-of-tree C client that cached `offsetof` values;
 - `compiled_liburing_major` and `compiled_liburing_minor` for build-time header
     visibility;
 - `probe(entries, flags)`, which returns a new reference to the same flat

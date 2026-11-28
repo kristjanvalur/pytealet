@@ -11,10 +11,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- ``Ring.break_wait_callback`` is an optional callable with no arguments.
-  ``break_wait()`` runs it after opening the idle park, including
-  ``stop_serving()``. A call that ``skip_owner_break_wait`` drops does
-  not run it. It does not run because a worker filled an SQE.
 - ``ACCEPT_TCP_NODELAY`` in the ``prepare_accept`` / ``prepare_accept_multishot``
   flags word. The bit is removed before ``accept4``. On success the extension
   sets ``TCP_NODELAY`` before the accepted fd is delivered, including a
@@ -166,16 +162,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when ``make_room`` is on. ``DEFER_TASKRUN`` still pins submit and
   reap to the creating thread: an enter from another thread is
   ``OSError``. The extension does not pre-check either flag.
-- ``IORING_SETUP_SQPOLL`` keeps the same automatic publish points as a
-  normal ring, including the three ``wait()`` publishes: before the
-  first reap, after a burst, and before a silent repark. Each of those
-  publishes an unpublished tail before the thread blocks, including a
-  nowait-only queue. A full submission queue still publishes so
-  ``prepare`` can take a slot. ``io_uring_submit`` copies the tail; the
-  kernel poller issues. A completion handler also publishes when it
-  returns if it prepared any SQE, including a direct nowait close,
-  shutdown, or poll_remove. The unique-waiter and host-park gates stay
-  off for that handler publish.
+- ``IORING_SETUP_SQPOLL`` uses the same ``wait()`` publish points as a
+  plain ring: before the first reap, and again after a burst when this
+  thread's publish count moved. The before-reap publish hands the kernel
+  thread an unpublished tail, including a nowait-only queue, before this
+  thread blocks. A full submission queue still publishes so ``prepare``
+  can take a slot. ``io_uring_submit`` copies the tail; the kernel
+  poller issues. A completion handler also publishes when it returns if
+  it prepared any SQE, including a direct nowait close, shutdown, or
+  poll_remove. The unique-waiter and host-park gates stay off for that
+  handler publish.
 - With ``IORING_SETUP_SQPOLL``, each publish point calls
   ``io_uring_submit``. liburing copies the tail when its userspace head
   is behind, and it does not enter when that copy published nothing.
@@ -187,13 +183,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``submit_next_events`` or ``submit_next_sqes``. A send-all continuation
   is prepared with the other SQEs from that completion and submitted by
   the same enter.
-- ``Ring.wait`` submits after handling a burst when this thread prepared
-  a waitable SQE during that handling, the same per-thread count a
-  service thread uses after its callback. The flush before the first
-  reap is unchanged: a queue that is already waitable is still
-  submitted, including SQEs another thread prepared before the call.
-  Before a silent burst parks again, that same harvest runs for a
-  waitable SQE this thread did not prepare.
+- ``Ring.wait`` submits after handling a burst when this thread's
+  publish count moved during that handling, the same per-thread count a
+  service thread uses after its callback. A plain ring moves the count
+  for a waitable SQE. ``SQPOLL`` also moves it for a direct nowait. The
+  flush before the first reap still runs once, before the call parks:
+  a queue that is already waitable is submitted, including SQEs another
+  thread prepared before the call. An SQE another thread queues during
+  the burst does not by itself cause that post-burst flush. When this
+  thread's count did move, that SQE is submitted with the tail. It stays
+  queued only when the burst did not move the count. A burst
+  that prepared nothing does not enter. A blocking or timed wait that
+  delivered nothing, and was not a ``break_wait``, parks again after
+  that flush.
 - A service thread enters after a completion callback only when that
   handling prepared a waitable SQE: a completion, a cancel that marks
   the queue waitable, or a close, shutdown, or poll_remove filled from

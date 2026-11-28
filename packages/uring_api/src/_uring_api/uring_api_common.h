@@ -256,10 +256,11 @@ enum {
  * SQPOLL uses the same points. io_uring_submit copies the tail and the
  * kernel thread issues. callback_submit is END_OF_TURN in that mode, so
  * a direct nowait counts and the waiter and host-park gates stay off.
- * there is no fill-wait list. a full SQ with make_room off returns
- * without entering and the caller raises SubmissionQueueFull. the three
- * wait() publishes stay on and each calls io_uring_submit, including for
- * a nowait-only queue, before the thread blocks. liburing copies the
+ * a full SQ with make_room off returns
+ * without entering and the caller raises SubmissionQueueFull. wait()
+ * publishes before the first reap, and again after a burst when this
+ * thread's publish count moved. under SQPOLL the before-reap publish
+ * includes a nowait-only queue. liburing copies the
  * tail when its userspace head is behind and skips the enter when that
  * copy published nothing. sq_waitable, the unique waiter, and the
  * driver_blocks latch stay runtime checks for WHEN_WAITER_HELD. both
@@ -320,9 +321,6 @@ struct UringApiRing {
     PyObject *delivery_exception_handler;
     /* optional: hook(context) when a nowait CQE fails (res < 0) */
     PyObject *nowait_error_handler;
-    /* optional: no-arg callable. break_wait runs it after opening the idle
-     * park. stop_serving uses that same path. */
-    PyObject *break_wait_callback;
     UringApiCompletionCallback c_delivery_callback;
     void *c_delivery_callback_user_data;
 #ifdef URING_API_USE_PYTHREAD_RING_LOCK
