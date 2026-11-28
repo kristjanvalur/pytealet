@@ -1422,24 +1422,6 @@ class _RunnableLink(_tasks.TaskLink):
 # and run after the lock is released.
 _host_wakeup_defer = threading.local()
 
-# set on the thread whose _break_wait is a scheduler wake. the proactor hook
-# stays quiet for that call; _wake_unless_owner_driving posts the host itself.
-_external_wakeup_suppress = threading.local()
-
-
-def _external_wakeup_suppressed() -> bool:
-    return getattr(_external_wakeup_suppress, "active", False) is True
-
-
-@contextmanager
-def _suppress_external_wakeup():
-    previous = getattr(_external_wakeup_suppress, "active", False)
-    _external_wakeup_suppress.active = True
-    try:
-        yield
-    finally:
-        _external_wakeup_suppress.active = previous
-
 
 @contextmanager
 def _defer_host_wakeups(pending: list[tuple[BaseScheduler, Callable[[], object]]]):
@@ -2448,28 +2430,9 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         thread does deliver it, so a spawn on the host thread asks for
         another ``turn``. The backend wake still runs, so a scheduler
         inside ``run()`` is unchanged when this is left unset.
-
-        A proactor scheduler also installs the callback on the proactor.
-        A worker ``wake_wait`` runs it, including housekeeping that does
-        not enter the scheduler. A wake this scheduler requests does not
-        run that hook a second time.
         """
 
         self._host_wakeup = callback
-        self._publish_external_wakeup()
-
-    def _publish_external_wakeup(self) -> None:
-        return
-
-    def _external_wakeup(self) -> None:
-        """Proactor hook. Quiet while this thread's ``_break_wait`` is a scheduler wake."""
-
-        if _external_wakeup_suppressed():
-            return
-        callback = self._host_wakeup
-        if callback is None:
-            return
-        self._invoke_host_wakeup(callback)
 
     def turn(self) -> float | None:
         """Run one non-blocking slice and return when the host should call again.
@@ -2509,10 +2472,7 @@ class BaseScheduler(_tasks.TaskLink, CoreSchedulerDrivingAPI):
         owner_in_turn = self._in_turn and threading.get_ident() == self._owner_thread
         if owner_in_turn and not self._in_internal_wait and not always_break:
             return
-        # the proactor hook would post the same host callback. this method
-        # decides that, including staying quiet while the owner is in a slice.
-        with _suppress_external_wakeup():
-            self._break_wait()
+        self._break_wait()
         callback = self._host_wakeup
         if callback is None or owner_in_turn:
             return

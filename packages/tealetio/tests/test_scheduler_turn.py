@@ -5,12 +5,10 @@ import threading
 import time
 
 import pytest
-import uring_api
 
 from tealetio import (
     BasicScheduler,
     SyncProactorScheduler,
-    UringProactor,
     open_connection,
     set_scheduler,
     sleep,
@@ -328,30 +326,6 @@ class TestTurnIo:
             scheduler.close()
             server.join(timeout=1)
 
-    def test_worker_wake_wait_posts_the_installed_host_wakeup(self):
-        scheduler = SyncProactorScheduler(proactor_factory=ThreadedSelectorProactor)
-        wakes: list[str] = []
-        scheduler.set_driver_wakeup(lambda: wakes.append("host"))
-
-        def kick() -> None:
-            scheduler.proactor.wake_wait()
-
-        try:
-            thread = threading.Thread(target=kick)
-            thread.start()
-            thread.join(1.0)
-            assert thread.is_alive() is False
-            assert wakes == ["host"]
-
-            scheduler.set_driver_wakeup(None)
-            thread = threading.Thread(target=kick)
-            thread.start()
-            thread.join(1.0)
-            assert thread.is_alive() is False
-            assert wakes == ["host"]
-        finally:
-            scheduler.close()
-
     def test_threaded_selector_spawn_between_slices_posts_the_host_once(self):
         scheduler = SyncProactorScheduler(proactor_factory=ThreadedSelectorProactor)
         set_scheduler(scheduler)
@@ -363,26 +337,6 @@ class TestTurnIo:
                 assert wakes == ["host"]
         finally:
             set_scheduler(None)
-            scheduler.close()
-
-    @pytest.mark.skipif(not uring_api.is_available(), reason="io_uring is not available")
-    def test_uring_worker_break_posts_the_host_and_the_owner_does_not(self):
-        scheduler = SyncProactorScheduler(proactor_factory=UringProactor)
-        wakes: list[str] = []
-        scheduler.set_driver_wakeup(lambda: wakes.append("host"))
-
-        def kick() -> None:
-            scheduler.proactor.wake_wait()
-
-        try:
-            scheduler.proactor.wake_wait()
-            assert wakes == []
-            thread = threading.Thread(target=kick)
-            thread.start()
-            thread.join(1.0)
-            assert thread.is_alive() is False
-            assert wakes == ["host"]
-        finally:
             scheduler.close()
 
 

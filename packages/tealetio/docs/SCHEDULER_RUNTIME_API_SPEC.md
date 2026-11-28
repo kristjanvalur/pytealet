@@ -927,19 +927,10 @@ Status: Implemented.
 - `ThreadedSelectorProactor` is the selector backend `Scheduler()` uses when
   io_uring is unavailable. A worker thread owns readiness polling and queues
   completed operations; `IOWaiter.complete` queues a scheduler callback that
-  stores the result and then sets a plain `Event`. `wake_wait()` also runs
-  `set_async_break()` so a host parked outside `wait()` (a Qt `exec`) hears
-  the worker. That hook runs after the worker drops the poll lock. It does
-  not re-enter. An exception on the worker goes to the delivery exception
-  handler, when one is set, and the poller keeps running. On the caller it
-  propagates.
-  `set_driver_wakeup` installs the scheduler callback there, and on uring
-  as `Ring.break_wait_callback`. A scheduler-initiated `_break_wait` does
-  not run the hook again; the scheduler posts the host wake itself. The
-  ring still drops that callback on the creating thread.
+  stores the result and then sets a plain `Event`.
   `SelectorProactor` remains the single-threaded prototype for
-  `run()`, which blocks in `wait()`, and runs the same hook from
-  `wake_wait()`. Hosting that single-threaded proactor with `turn()` is
+  `run()`, which blocks in `wait()`, and may use `set_async_break()` when
+  `wait_async()` blocks an executor thread. Hosting it with `turn()` is
   future work.
 - Keep blocking convenience waits such as `wait_readable(...)` and
   `wait_writable(...)` layered over reader/writer registration, rather than

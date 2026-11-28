@@ -37,7 +37,6 @@ from .scheduler import (
     SyncSchedulerDrivingAPI,
     _defer_host_wakeups,
     _deliver_deferred_host_wakeups,
-    _external_wakeup_suppressed,
 )
 from .socket_helpers import configure_scheduler_socket, set_tcp_nodelay, socket
 from .types import IoExpect, IoMore, RecvResult
@@ -88,15 +87,6 @@ _OneshotCallback = Callable[[Any, BaseException | None], object]
 _AcceptManyCallback = Callable[[MultishotDelivery], object]
 _PollManyCallback = Callable[[MultishotDelivery], object]
 _SetOp = Callable[[OpHandle], object]
-
-# one-deep, per thread, same shape as the ring's break_wait_callback_depth.
-# a hook that calls wake_wait again still signals the wait. it must not
-# re-enter the hook.
-_async_break_depth = threading.local()
-
-
-def _async_break_reentered() -> bool:
-    return getattr(_async_break_depth, "depth", 0) > 0
 
 
 class WakeupManager(Protocol):
@@ -844,8 +834,6 @@ class Proactor(Protocol):
 
     def wake_wait(self) -> None: ...
 
-    def set_async_break(self, callback: Callable[[], object] | None) -> None: ...
-
     def set_delivery_exception_handler(
         self,
         handler: Callable[[dict[str, Any]], object] | None,
@@ -1237,59 +1225,14 @@ class ProactorBase:
         return guarded
 
     def set_async_break(self, callback: Callable[[], object] | None) -> None:
-        """Optional hook selector ``wake_wait()`` runs for a host outside ``wait()``.
-
-        ``SelectorProactor`` and ``ThreadedSelectorProactor`` both run it.
-        A Qt ``exec`` on the threaded backend is that host. ``UringProactor``
-        does not run it; its hook is ``Ring.break_wait_callback``. The
-        threaded worker runs this hook after it drops the poll lock.
-        The hook is not re-entered on the thread already running it. On
-        that worker an exception goes to the delivery exception handler,
-        when one is set, and the poller stays up. On the caller it
-        propagates.
-        """
+        """Optional hook ``SelectorProactor.wake_wait()`` runs after selector wakeup."""
 
         self._async_break = callback
 
-    def _external_break(self) -> Callable[[], object] | None:
-        # a scheduler wake breaks the backend and posts the host itself.
-        # housekeeping calls wake_wait with the suppress flag clear.
-        if _external_wakeup_suppressed():
-            return None
-        return self._async_break
-
-    def _call_async_break(self, callback: Callable[[], object]) -> None:
-        # nested wake_wait has already signalled the wait. skip the hook.
-        if _async_break_reentered():
-            return
-        _async_break_depth.depth = 1
-        try:
-            callback()
-        finally:
-            _async_break_depth.depth = 0
-
-    def _report_async_break_error(self, exc: Exception) -> None:
-        """Report a hook failure that must not kill the selector worker.
-
-        No handler: drop it, as a nowait send does. The poller still stays
-        up. A scheduler installs ``call_exception_handler`` here.
-        """
-
-        handler = self._delivery_exception_handler
-        if handler is None:
-            return
-        handler(
-            {
-                "message": "Exception in async break callback",
-                "exception": exc,
-                "proactor": self,
-            }
-        )
-
     def _run_async_break(self) -> None:
-        break_cb = self._external_break()
+        break_cb = self._async_break
         if break_cb is not None:
-            self._call_async_break(break_cb)
+            break_cb()
 
     def bind_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
         """Bind this proactor to an asyncio event loop for async waits."""
@@ -1664,7 +1607,7 @@ class SelectorProactor(ProactorBase):
             self._detach_owner_hooks()
 
     def wake_wait(self) -> None:
-        """Write the wakeup socketpair and run ``set_async_break``.
+        """Write the wakeup socketpair.
 
         ``wait`` is blocked in ``select`` on that reader. A byte written
         before ``select`` stays readable, so the break is sticky.
@@ -2680,8 +2623,6 @@ class ThreadedSelectorProactor(SelectorProactor):
         self._worker_started = False
         self._worker_stop = threading.Event()
         self._worker = threading.Thread(target=self._worker_main, name="tealetio-selector-proactor", daemon=True)
-        # callbacks queued by wake_wait on the worker, delivered after the poll lock
-        self._deferred_breaks: list[Callable[[], object]] | None = None
 
     def _bind_wakeup_loop(self, loop: _asyncio.AbstractEventLoop) -> None:
         self._completed_wait.bind_loop(loop)
@@ -2699,45 +2640,9 @@ class ThreadedSelectorProactor(SelectorProactor):
         super().close()
 
     def wake_wait(self) -> None:
-        """Wake a thread blocked in `wait`, and a host parked outside it.
-
-        ``EventWakeupManager`` unblocks ``wait`` / ``wait_async``.
-        ``set_async_break`` is the extra poke for a host in its own loop,
-        such as Qt ``exec``. The selector worker queues that hook until
-        ``_poll`` drops the proactor lock. Any other thread runs it now.
-        A hook already on this thread's stack is not called again; the
-        event signal above still runs. An exception on the worker is
-        reported and the poller stays up. On any other thread it propagates.
-        """
+        """Wake a thread blocked in `wait`."""
 
         self._completed_wait.wakeup()
-        # the signal above is the re-entrant wake. do not queue or call again.
-        if _async_break_reentered():
-            return
-        callback = self._external_break()
-        if callback is None:
-            return
-        if threading.current_thread() is self._worker:
-            deferred = self._deferred_breaks
-            if deferred is not None:
-                deferred.append(callback)
-                return
-            self._run_worker_async_break(callback)
-            return
-        self._call_async_break(callback)
-
-    def _run_worker_async_break(self, callback: Callable[[], object]) -> None:
-        # Exception only. SystemExit and KeyboardInterrupt still leave the thread.
-        try:
-            self._call_async_break(callback)
-        except Exception as exc:
-            self._report_async_break_error(exc)
-
-    def _deliver_async_breaks(self, pending: list[Callable[[], object]]) -> None:
-        callbacks = pending.copy()
-        pending.clear()
-        for callback in callbacks:
-            self._run_worker_async_break(callback)
 
     def _after_selector_registration_changed(self) -> None:
         self._wake_selector()
@@ -2782,20 +2687,13 @@ class ThreadedSelectorProactor(SelectorProactor):
     def _worker_main(self) -> None:
         while not self._worker_stop.is_set():
             deferred: list[tuple[BaseScheduler, Callable[[], object]]] = []
-            breaks: list[Callable[[], object]] = []
             try:
-                self._deferred_breaks = breaks
-                try:
-                    with self._lock, _defer_host_wakeups(deferred):
-                        self._poll(None)
-                finally:
-                    self._deferred_breaks = None
+                with self._lock, _defer_host_wakeups(deferred):
+                    self._poll(None)
             except (OSError, ValueError, RuntimeError):
                 _deliver_deferred_host_wakeups(deferred)
-                self._deliver_async_breaks(breaks)
                 return
             _deliver_deferred_host_wakeups(deferred)
-            self._deliver_async_breaks(breaks)
 
     def _wait_for_completed(self, timeout: float | None) -> None:
         self._completed_wait.wait(timeout=timeout)
@@ -3114,10 +3012,6 @@ class UringProactor(ProactorBase):
             return
         self._closed = True
         self._clear_shared_recv_buffer_pool()
-        # stop_serving breaks the wait. drop the host hook first so close
-        # does not ask for another turn.
-        self._ring.break_wait_callback = None
-        self._async_break = None
         if self._service_threads:
             self._ring.stop_serving()
             for thread in self._service_threads:
@@ -3148,21 +3042,6 @@ class UringProactor(ProactorBase):
         completed = self._completed_wait
         if completed is not None:
             completed.bind_loop(loop)
-
-    def set_async_break(self, callback: Callable[[], object] | None) -> None:
-        """Install the host hook ``break_wait`` runs for a non-owner caller.
-
-        ``skip_owner_break_wait`` drops a call from the thread that created
-        the ring, including this callback. A worker ``break_wait`` runs it
-        after opening the idle park.
-        """
-
-        super().set_async_break(callback)
-        self._ring.break_wait_callback = callback
-
-    def _detach_owner_hooks(self) -> None:
-        self._ring.break_wait_callback = None
-        super()._detach_owner_hooks()
 
     def wake_wait(self) -> None:
         """Unblock sync ``wait`` and threaded async ``wait_async``.
@@ -4003,15 +3882,6 @@ class ProactorScheduler(BaseScheduler):
     # -- Driver wakeup -------------------------------------------------
     # Internals use _proactor and assert: post-close is a contract bug, not API misuse.
     # RuntimeError("… closed") lives on public .proactor / .io only.
-
-    def _publish_external_wakeup(self) -> None:
-        proactor = self._proactor
-        if proactor is None:
-            return
-        if self._host_wakeup is None:
-            proactor.set_async_break(None)
-            return
-        proactor.set_async_break(self._external_wakeup)
 
     def _break_wait(self) -> None:
         """Call ``Proactor.wake_wait`` for the parked ``wait`` or ``wait_async``.
